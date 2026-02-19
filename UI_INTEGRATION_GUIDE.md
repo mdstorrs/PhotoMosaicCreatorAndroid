@@ -3,11 +3,11 @@
 ## ViewModel Pattern Example
 
 ```kotlin
-import androidx.lifecycle.ViewModel
-import androidx.lifecycle.viewModelScope
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
+//import androidx.lifecycle.ViewModel
+//import androidx.lifecycle.viewModelScope
+//import kotlinx.coroutines.launch
+//import kotlinx.coroutines.flow.MutableStateFlow
+//import kotlinx.coroutines.flow.StateFlow
 
 class MosaicGenerationViewModel : ViewModel() {
     private val service = CoreMosaicGenerationService()

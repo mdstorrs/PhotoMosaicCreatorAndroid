@@ -1,24 +1,33 @@
 package com.storrs.photomosaiccreatorandroid.ui.viewmodel
 
+import android.app.Application
 import android.content.Context
+import android.graphics.BitmapFactory
 import android.os.Environment
-import androidx.lifecycle.ViewModel
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.storrs.photomosaiccreatorandroid.models.*
+import com.storrs.photomosaiccreatorandroid.persistence.StateRepository
 import com.storrs.photomosaiccreatorandroid.services.CoreMosaicGenerationService
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
+import kotlin.math.ceil
+import kotlin.math.floor
 
 /**
  * ViewModel for managing mosaic generation state and user interactions.
+ * Uses AndroidViewModel for Application context to persist state.
  */
-class MosaicViewModel : ViewModel() {
+class MosaicViewModel(application: Application) : AndroidViewModel(application) {
 
     private val service = CoreMosaicGenerationService()
+    private val repo = StateRepository(application)
 
     // State management
     private val _generationState = MutableStateFlow<GenerationState>(GenerationState.Idle)
@@ -33,11 +42,75 @@ class MosaicViewModel : ViewModel() {
     private val _cellPhotoPaths = MutableStateFlow<List<String>>(emptyList())
     val cellPhotoPaths: StateFlow<List<String>> = _cellPhotoPaths
 
+    private val _settings = MutableStateFlow(createDefaultSettings())
+    val settings: StateFlow<MosaicSettingsState> = _settings
+
+    private val orientationCache = mutableMapOf<String, PhotoOrientation>()
+
+    init {
+        restoreState()
+        recomputeSettings()
+    }
+
+    /**
+     * Restores persisted state from SharedPreferences.
+     */
+    private fun restoreState() {
+        // Restore primary image (only if the file still exists)
+        repo.loadPrimaryImagePath()?.let { path ->
+            if (File(path).exists()) {
+                _primaryImagePath.value = path
+            }
+        }
+
+        // Restore cell photos (filter out any that no longer exist)
+        val savedCells = repo.loadCellPhotoPaths().filter { File(it).exists() }
+        if (savedCells.isNotEmpty()) {
+            _cellPhotoPaths.value = savedCells
+        }
+
+        // Restore settings
+        val defaults = createDefaultSettings()
+        var restored = defaults
+
+        repo.loadPrintSizeLabel()?.let { label ->
+            defaults.printSizes.firstOrNull { it.label == label }?.let {
+                restored = restored.copy(selectedPrintSize = it)
+            }
+        }
+
+        repo.loadCellSizeLabel()?.let { label ->
+            defaults.cellSizes.firstOrNull { it.label == label }?.let {
+                restored = restored.copy(selectedCellSize = it)
+            }
+        }
+
+        val savedColorChange = repo.loadColorChangePercent()
+        if (savedColorChange >= 0) {
+            restored = restored.copy(colorChangePercent = savedColorChange)
+        }
+
+        repo.loadPattern()?.let {
+            restored = restored.copy(pattern = it)
+        }
+
+        repo.loadUseAllImages()?.let {
+            restored = restored.copy(useAllImages = it)
+        }
+
+        repo.loadMirrorImages()?.let {
+            restored = restored.copy(mirrorImages = it)
+        }
+
+        _settings.value = restored
+    }
+
     /**
      * Set the primary image path.
      */
     fun setPrimaryImagePath(path: String?) {
         _primaryImagePath.value = path
+        repo.savePrimaryImagePath(path)
     }
 
     /**
@@ -45,6 +118,8 @@ class MosaicViewModel : ViewModel() {
      */
     fun setCellPhotoPaths(paths: List<String>) {
         _cellPhotoPaths.value = paths.distinct()
+        repo.saveCellPhotoPaths(_cellPhotoPaths.value)
+        recomputeSettings()
     }
 
     /**
@@ -54,6 +129,8 @@ class MosaicViewModel : ViewModel() {
         val merged = LinkedHashSet(_cellPhotoPaths.value)
         merged.addAll(paths)
         _cellPhotoPaths.value = merged.toList()
+        repo.saveCellPhotoPaths(_cellPhotoPaths.value)
+        recomputeSettings()
     }
 
     /**
@@ -61,6 +138,8 @@ class MosaicViewModel : ViewModel() {
      */
     fun clearCellPhotos() {
         _cellPhotoPaths.value = emptyList()
+        repo.saveCellPhotoPaths(emptyList())
+        recomputeSettings()
     }
 
     /**
@@ -69,6 +148,119 @@ class MosaicViewModel : ViewModel() {
     fun removeCellPhotos(paths: List<String>) {
         if (paths.isEmpty()) return
         _cellPhotoPaths.value = _cellPhotoPaths.value.filterNot { it in paths }
+        repo.saveCellPhotoPaths(_cellPhotoPaths.value)
+        recomputeSettings()
+    }
+
+    fun updatePrintSize(option: PrintSizeOption) {
+        _settings.value = _settings.value.copy(selectedPrintSize = option)
+        repo.savePrintSizeLabel(option.label)
+        recomputeSettings()
+    }
+
+    fun updateCellSize(option: CellSizeOption) {
+        _settings.value = _settings.value.copy(selectedCellSize = option)
+        repo.saveCellSizeLabel(option.label)
+        recomputeSettings()
+    }
+
+    fun updateColorChange(percent: Int) {
+        _settings.value = _settings.value.copy(colorChangePercent = percent.coerceIn(0, 100))
+        repo.saveColorChangePercent(percent.coerceIn(0, 100))
+        recomputeSettings()
+    }
+
+    fun updatePattern(pattern: PatternKind) {
+        _settings.value = _settings.value.copy(pattern = pattern)
+        repo.savePattern(pattern)
+        recomputeSettings()
+    }
+
+    fun updateUseAllImages(enabled: Boolean) {
+        _settings.value = _settings.value.copy(useAllImages = enabled)
+        repo.saveUseAllImages(enabled)
+    }
+
+    fun updateMirrorImages(enabled: Boolean) {
+        _settings.value = _settings.value.copy(mirrorImages = enabled)
+        repo.saveMirrorImages(enabled)
+    }
+
+    fun buildDebugReport(primaryPath: String?, cellPaths: List<String>): String {
+        if (primaryPath.isNullOrBlank()) {
+            return "Primary image not selected."
+        }
+        if (cellPaths.isEmpty()) {
+            return "No cell photos selected."
+        }
+
+        val project = createDefaultProject(primaryPath, cellPaths)
+        val report = StringBuilder()
+        val settings = _settings.value
+
+        report.appendLine("Primary Image:")
+        report.appendLine("  Path: ${project.primaryImagePath}")
+        report.appendLine()
+
+        val landscapeCount = project.cellPhotos.count { it.orientation == PhotoOrientation.Landscape }
+        val portraitCount = project.cellPhotos.count { it.orientation == PhotoOrientation.Portrait }
+
+        report.appendLine("Cell Photos:")
+        report.appendLine("  Count: ${project.cellPhotos.size}")
+        report.appendLine("  Landscape: $landscapeCount")
+        report.appendLine("  Portrait: $portraitCount")
+        report.appendLine()
+
+        report.appendLine("Print Size:")
+        report.appendLine("  Name: ${project.selectedPrintSize?.name}")
+        report.appendLine("  Width: ${project.selectedPrintSize?.width}")
+        report.appendLine("  Height: ${project.selectedPrintSize?.height}")
+        report.appendLine()
+
+        report.appendLine("Resolution:")
+        report.appendLine("  Name: ${project.selectedResolution?.name}")
+        report.appendLine("  DPI: ${project.selectedResolution?.ppi}")
+        report.appendLine()
+
+        report.appendLine("Cell Size:")
+        report.appendLine("  Name: ${project.selectedCellSize?.name}")
+        report.appendLine("  Size (mm): ${project.selectedCellSize?.sizeMm}")
+        report.appendLine()
+
+        report.appendLine("Pattern:")
+        report.appendLine("  Name: ${project.selectedCellPhotoPattern?.name}")
+        report.appendLine()
+
+        report.appendLine("Color Change:")
+        report.appendLine("  Name: ${project.selectedColorChange?.name}")
+        report.appendLine("  Percentage: ${project.selectedColorChange?.percentageChange}")
+        report.appendLine()
+
+        report.appendLine("Duplicate Spacing:")
+        report.appendLine("  Name: ${project.selectedDuplicateSpacing?.name}")
+        report.appendLine("  Min Spacing: ${project.selectedDuplicateSpacing?.minSpacing}")
+        report.appendLine()
+
+        report.appendLine("Max Duplicates:")
+        report.appendLine("  Value: ${settings.maxDuplicates}")
+        report.appendLine()
+
+        report.appendLine("Custom Sizing:")
+        report.appendLine("  Custom Width: ${project.customWidth}")
+        report.appendLine("  Custom Height: ${project.customHeight}")
+        report.appendLine("  Custom Cell Size: ${project.customCellSize}")
+        report.appendLine("  Custom Color Change: ${project.customColorChange}")
+        report.appendLine()
+
+        report.appendLine("Placement Options:")
+        report.appendLine("  Cell Shape: ${project.cellShape}")
+        report.appendLine("  Cell Image Fit Mode: ${project.cellImageFitMode}")
+        report.appendLine("  Primary Image Sizing: ${project.primaryImageSizingMode}")
+        report.appendLine("  Random Cell Candidates: ${project.randomCellCandidates}")
+        report.appendLine("  Use All Images: ${project.useAllImages}")
+        report.appendLine("  Create Report: ${project.createReport}")
+
+        return report.toString()
     }
 
     /**
@@ -97,6 +289,7 @@ class MosaicViewModel : ViewModel() {
                 // Generate mosaic
                 val result = service.generateMosaic(
                     project,
+                    maxUsesOverride = null, // Let the service calculate based on actual cell counts
                     onProgress = { progress ->
                         _progress.value = progress
                     }
@@ -180,37 +373,219 @@ class MosaicViewModel : ViewModel() {
         primaryImagePath: String,
         cellPhotoPaths: List<String>
     ): PhotoMosaicProject {
+        val settings = _settings.value
+        val patternName = when (settings.pattern) {
+            PatternKind.Parquet -> "Parquet ${settings.parquetRatio}"
+            else -> "Square"
+        }
+
         return PhotoMosaicProject(
             primaryImagePath = primaryImagePath,
             cellPhotos = cellPhotoPaths.map { path ->
                 CellPhoto(
                     path = path,
-                    // Try to determine orientation from filename or default to Square
-                    orientation = PhotoOrientation.Square
+                    orientation = orientationCache[path] ?: PhotoOrientation.Square
                 )
             },
-            // Default print size: 20" x 30"
-            selectedPrintSize = PrintSize("20x30", 20.0, 30.0),
-            // Default resolution: 300 DPI (high quality print)
+            selectedPrintSize = PrintSize(
+                settings.selectedPrintSize.label,
+                settings.selectedPrintSize.widthInches,
+                settings.selectedPrintSize.heightInches
+            ),
             selectedResolution = Resolution("300 DPI", 300),
-            // Default cell size: 15mm
-            selectedCellSize = CellSize("15mm", 15.0),
-            // Default pattern: Square
-            selectedCellPhotoPattern = CellPhotoPatternConfig("Square"),
-            // Default color change: 10%
-            selectedColorChange = ColorChange("20%", 20),
-            // Default duplicate spacing: 3
-            selectedDuplicateSpacing = DuplicateSpacing("3", 3),
-            // Other defaults
+            selectedCellSize = CellSize(
+                settings.selectedCellSize.label,
+                settings.selectedCellSize.sizeMm
+            ),
+            selectedCellPhotoPattern = CellPhotoPatternConfig(patternName),
+            selectedColorChange = ColorChange(
+                "${settings.colorChangePercent}%",
+                settings.colorChangePercent
+            ),
+            selectedDuplicateSpacing = DuplicateSpacing(
+                settings.duplicateSpacing.toString(),
+                settings.duplicateSpacing
+            ),
             cellShape = CellShape.Square,
             cellImageFitMode = CellImageFitMode.CropCenter,
             primaryImageSizingMode = PrimaryImageSizingMode.KeepAspectRatio,
             randomCellCandidates = 5,
-            useAllImages = false,
+            useAllImages = settings.useAllImages,
             createReport = true
         )
     }
+
+    private fun recomputeSettings() {
+        viewModelScope.launch {
+            val current = _settings.value
+            val paths = _cellPhotoPaths.value
+            val counts = computePhotoCounts(paths)
+            val totalCells = calculateTotalCells(
+                current.selectedPrintSize,
+                current.selectedCellSize
+            )
+            val maxDuplicates = if (paths.isEmpty()) {
+                0
+            } else {
+                ceil((totalCells / paths.size.toDouble()) * 2).toInt()
+            }
+            val smallestCount = minOf(counts.landscape, counts.portrait)
+            val duplicateSpacing = ceil(smallestCount / 10.0).toInt()
+            val parquetRatio = computeParquetRatio(counts.landscape, counts.portrait)
+
+            _settings.value = current.copy(
+                landscapeCount = counts.landscape,
+                portraitCount = counts.portrait,
+                totalCells = totalCells,
+                maxDuplicates = maxDuplicates,
+                duplicateSpacing = duplicateSpacing,
+                parquetRatio = parquetRatio
+            )
+        }
+    }
+
+    private suspend fun computePhotoCounts(paths: List<String>): PhotoCounts {
+        return withContext(Dispatchers.Default) {
+            var landscape = 0
+            var portrait = 0
+
+            for (path in paths) {
+                val orientation = orientationCache[path] ?: detectOrientation(path)
+                orientationCache[path] = orientation
+                when (orientation) {
+                    PhotoOrientation.Landscape -> landscape++
+                    PhotoOrientation.Portrait -> portrait++
+                    else -> Unit
+                }
+            }
+
+            PhotoCounts(
+                total = paths.size,
+                landscape = landscape,
+                portrait = portrait
+            )
+        }
+    }
+
+    private fun detectOrientation(path: String): PhotoOrientation {
+        return try {
+            val options = BitmapFactory.Options().apply {
+                inJustDecodeBounds = true
+            }
+            BitmapFactory.decodeFile(path, options)
+            val width = options.outWidth
+            val height = options.outHeight
+            when {
+                width > height -> PhotoOrientation.Landscape
+                height > width -> PhotoOrientation.Portrait
+                else -> PhotoOrientation.Square
+            }
+        } catch (_: Exception) {
+            PhotoOrientation.Square
+        }
+    }
+
+    private fun calculateTotalCells(
+        printSize: PrintSizeOption,
+        cellSize: CellSizeOption
+    ): Int {
+        val widthMm = printSize.widthInches * 25.4
+        val heightMm = printSize.heightInches * 25.4
+        val columns = floor(widthMm / cellSize.sizeMm).toInt().coerceAtLeast(1)
+        val rows = floor(heightMm / cellSize.sizeMm).toInt().coerceAtLeast(1)
+        return rows * columns
+    }
+
+    private fun computeParquetRatio(landscape: Int, portrait: Int): String {
+        if (landscape == 0 && portrait == 0) return "N/A"
+        if (landscape == 0) return "0:${maxOf(portrait, 1)}"
+        if (portrait == 0) return "${maxOf(landscape, 1)}:0"
+
+        val gcd = gcd(landscape, portrait)
+        val l = (landscape / gcd).coerceAtLeast(1)
+        val p = (portrait / gcd).coerceAtLeast(1)
+        return "$l:$p"
+    }
+
+    private fun gcd(a: Int, b: Int): Int {
+        var x = a
+        var y = b
+        while (y != 0) {
+            val temp = x % y
+            x = y
+            y = temp
+        }
+        return x.coerceAtLeast(1)
+    }
 }
+
+private fun createDefaultSettings(): MosaicSettingsState {
+    val printSizes = listOf(
+        PrintSizeOption("X-Small", 8.0, 12.0),
+        PrintSizeOption("Small", 12.0, 18.0),
+        PrintSizeOption("Medium", 16.0, 24.0),
+        PrintSizeOption("Large", 20.0, 30.0),
+        PrintSizeOption("X-Large", 26.67, 40.0),
+        PrintSizeOption("XX-Large", 40.0, 60.0)
+    )
+    val cellSizes = listOf(
+        CellSizeOption("9mm", 9.0),
+        CellSizeOption("12mm", 12.0),
+        CellSizeOption("15mm", 15.0),
+        CellSizeOption("18mm", 18.0),
+        CellSizeOption("21mm", 21.0),
+        CellSizeOption("24mm", 24.0)
+    )
+    val defaultPrint = printSizes.first { it.label == "Large" }
+    val defaultCell = cellSizes.first { it.label == "15mm" }
+
+    return MosaicSettingsState(
+        printSizes = printSizes,
+        cellSizes = cellSizes,
+        selectedPrintSize = defaultPrint,
+        selectedCellSize = defaultCell,
+        colorChangePercent = 10,
+        pattern = PatternKind.Square,
+        parquetRatio = "N/A",
+        useAllImages = true,
+        mirrorImages = true,
+        dpi = 300,
+        maxDuplicates = 0,
+        duplicateSpacing = 0,
+        landscapeCount = 0,
+        portraitCount = 0,
+        totalCells = 0
+    )
+}
+
+data class PrintSizeOption(
+    val label: String,
+    val widthInches: Double,
+    val heightInches: Double
+)
+
+data class CellSizeOption(
+    val label: String,
+    val sizeMm: Double
+)
+
+data class MosaicSettingsState(
+    val printSizes: List<PrintSizeOption>,
+    val cellSizes: List<CellSizeOption>,
+    val selectedPrintSize: PrintSizeOption,
+    val selectedCellSize: CellSizeOption,
+    val colorChangePercent: Int,
+    val pattern: PatternKind,
+    val parquetRatio: String,
+    val useAllImages: Boolean,
+    val mirrorImages: Boolean,
+    val dpi: Int,
+    val maxDuplicates: Int,
+    val duplicateSpacing: Int,
+    val landscapeCount: Int,
+    val portraitCount: Int,
+    val totalCells: Int
+)
 
 /**
  * Represents the state of mosaic generation.

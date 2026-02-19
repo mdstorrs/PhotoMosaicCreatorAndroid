@@ -53,7 +53,7 @@ class CoreMosaicGenerationService {
             validateProject(project)
 
             reportProgress(onProgress, 1, "Get Pattern")
-            val pattern = getPatternInfo(project.selectedCellPhotoPattern)
+            val pattern = resolvePatternInfo(getPatternInfo(project.selectedCellPhotoPattern), project.cellPhotos)
 
             reportProgress(onProgress, 2, "Verify Primary Image")
             val primaryPath = project.primaryImagePath ?: throw IllegalStateException("Primary image not selected")
@@ -205,7 +205,7 @@ class CoreMosaicGenerationService {
     ): MosaicPlan {
         validateProject(project)
 
-        val pattern = getPatternInfo(project.selectedCellPhotoPattern)
+        val pattern = resolvePatternInfo(getPatternInfo(project.selectedCellPhotoPattern), project.cellPhotos)
         val primaryPath = project.primaryImagePath ?: throw IllegalStateException("Primary image not selected")
         val primaryFile = File(primaryPath)
 
@@ -481,6 +481,15 @@ class CoreMosaicGenerationService {
         var portraitWidth = shapeHeight
         var portraitHeight = shapeWidth
 
+        // For parquet with square cells, force 4:3 so landscape/portrait differ
+        if (pattern.kind == PatternKind.Parquet && landscapeWidth == landscapeHeight) {
+            val (pw, ph) = getCellDimensions(baseCellPixels, CellShape.Rectangle4x3)
+            landscapeWidth = pw
+            landscapeHeight = ph
+            portraitWidth = ph
+            portraitHeight = pw
+        }
+
         if (pattern.kind == PatternKind.Square) {
             landscapeWidth = baseCellPixels
             landscapeHeight = baseCellPixels
@@ -695,7 +704,8 @@ class CoreMosaicGenerationService {
     }
 
     /**
-     * Counts cells in a parquet pattern.
+     * Counts cells in a parquet pattern using unit-grid occupancy.
+     * Exact translation of C# CountParquetCells.
      */
     private fun countParquetCells(grid: GridDimensions, pattern: PatternInfo): CellCounts {
         val unitSize = grid.baseCellPixels
@@ -745,10 +755,14 @@ class CoreMosaicGenerationService {
                 }
 
                 val orientation = sequence[patternIndex]
-                val (widthUnits, heightUnits) = if (orientation == PhotoOrientation.Portrait) {
-                    Pair(portraitWidthUnits, portraitHeightUnits)
+                val widthUnits: Int
+                val heightUnits: Int
+                if (orientation == PhotoOrientation.Portrait) {
+                    widthUnits = portraitWidthUnits
+                    heightUnits = portraitHeightUnits
                 } else {
-                    Pair(landscapeWidthUnits, landscapeHeightUnits)
+                    widthUnits = landscapeWidthUnits
+                    heightUnits = landscapeHeightUnits
                 }
 
                 if (!canPlace(occupied, xUnit, yUnitForOccupancy, widthUnits, heightUnits, totalColumns, totalRows)) {
@@ -757,11 +771,21 @@ class CoreMosaicGenerationService {
                 }
 
                 markOccupied(occupied, xUnit, yUnitForOccupancy, widthUnits, heightUnits)
-                totalCells++
-                if (orientation == PhotoOrientation.Portrait) {
-                    portraitCells++
-                } else {
-                    landscapeCells++
+
+                // Only count cells that are at least partially visible on the output canvas
+                val px = (xUnit - leftPaddingUnits) * unitSize
+                val py = currentYUnit * unitSize
+                val pw = widthUnits * unitSize
+                val ph = heightUnits * unitSize
+                val isVisible = px + pw > 0 && py + ph > 0 && px < grid.width && py < grid.height
+
+                if (isVisible) {
+                    totalCells++
+                    if (orientation == PhotoOrientation.Portrait) {
+                        portraitCells++
+                    } else {
+                        landscapeCells++
+                    }
                 }
 
                 if (orientation == PhotoOrientation.Portrait && deltaUnits > 0) {
@@ -841,9 +865,8 @@ class CoreMosaicGenerationService {
         val randomCellCandidates = project.randomCellCandidates.coerceIn(1, 20)
         val placements = mutableListOf<MosaicPlacement>()
 
-        reportProgress(onProgress, 15, "Building cell placement map (${grid.rows}×${grid.columns} grid)")
+        reportProgress(onProgress, 15, "Building cell placement map (${grid.rows}x${grid.columns} grid)")
 
-        // OPTIMIZATION: Load primary bitmap pixels once instead of for every cell
         val primaryPixels = IntArray(primary.width * primary.height)
         primary.getPixels(primaryPixels, 0, primary.width, 0, 0, primary.width, primary.height)
 
@@ -866,7 +889,6 @@ class CoreMosaicGenerationService {
                 )
             }
 
-            // Report progress for building placement map
             val buildPercent = 15 + ((row + 1) * 5 / maxOf(1, grid.rows))
             reportProgress(onProgress, buildPercent, "Building placement map: ${row + 1}/${grid.rows}")
         }
@@ -911,7 +933,7 @@ class CoreMosaicGenerationService {
 
         for (placement in availablePlacements) {
             val match = findBestMatch(
-                cache, placement.targetQuadrants, maxUses, minSpacing,
+                cache, placement.targetQuadrants, maxUses, minSpacing, minSpacing,
                 placement.row, placement.col, randomCellCandidates,
                 lastUsedPositions, requiredOrientation
             )
@@ -937,7 +959,8 @@ class CoreMosaicGenerationService {
     }
 
     /**
-     * Creates a parquet pattern mosaic.
+     * Creates a parquet pattern mosaic using unit-grid occupancy.
+     * Exact translation of C# CreateParquetMosaic.
      */
     private suspend fun createParquetMosaic(
         primary: Bitmap,
@@ -952,12 +975,269 @@ class CoreMosaicGenerationService {
         onProgress: ((MosaicGenerationProgress) -> Unit)? = null,
         scope: CoroutineScope
     ): Bitmap = withContext(Dispatchers.Default) {
-        // Parquet implementation similar to standard but with unit-based grid
-        // For now, delegating to standard implementation
-        createStandardMosaic(
-            primary, cache, grid, project, pattern, maxUses,
-            totalCells, useAllImages, usage, onProgress, scope
-        )
+        val mosaic = Bitmap.createBitmap(grid.width, grid.height, Bitmap.Config.RGB_565)
+        val canvas = Canvas(mosaic)
+
+        reportProgress(onProgress, 10, "Analyzing primary image colors")
+
+        val colorAdjustPercent = getColorAdjustPercent(project)
+        val minSpacing = project.selectedDuplicateSpacing?.minSpacing ?: 0
+        val lastUsedPixelPositions = mutableMapOf<String, MutableList<Pair<Int, Int>>>()
+
+        val unitSize = grid.baseCellPixels
+        val unitColumns = grid.unitColumns
+        val unitRows = grid.unitRows
+
+        val landscapeWidthUnits = maxOf(1, grid.landscapeCellWidth / unitSize)
+        val landscapeHeightUnits = maxOf(1, grid.landscapeCellHeight / unitSize)
+        val portraitWidthUnits = maxOf(1, grid.portraitCellWidth / unitSize)
+        val portraitHeightUnits = maxOf(1, grid.portraitCellHeight / unitSize)
+
+        val sequence = buildParquetSequence(pattern)
+        val deltaUnits = maxOf(0, portraitHeightUnits - landscapeHeightUnits)
+        val cycleWidthUnits = maxOf(1, (pattern.landscapeCount * landscapeWidthUnits) + (pattern.portraitCount * portraitWidthUnits))
+        val cyclesAcross = maxOf(1, (unitColumns + cycleWidthUnits - 1) / cycleWidthUnits) + 1
+        val maxPortraitsPerRow = maxOf(0, pattern.portraitCount * cyclesAcross)
+        val topPaddingUnits = deltaUnits * maxPortraitsPerRow
+        val rowCount = maxOf(1, (unitRows + topPaddingUnits + landscapeHeightUnits - 1) / landscapeHeightUnits)
+        val leftPaddingUnits = portraitWidthUnits * rowCount
+        val totalColumns = unitColumns + leftPaddingUnits + cycleWidthUnits
+        val tRows = unitRows + topPaddingUnits + portraitHeightUnits
+
+        val occupied = Array(tRows) { BooleanArray(totalColumns) }
+        val plannedOccupied = Array(tRows) { BooleanArray(totalColumns) }
+        val randomCellCandidates = project.randomCellCandidates.coerceIn(1, 20)
+        val placements = mutableListOf<MosaicPlacement>()
+
+        val primaryPixels = IntArray(primary.width * primary.height)
+        primary.getPixels(primaryPixels, 0, primary.width, 0, 0, primary.width, primary.height)
+
+        reportProgress(onProgress, 15, "Building placement map")
+
+        var rowIndex = 0
+        while (rowIndex * landscapeHeightUnits < tRows) {
+            val baseYUnit = (rowIndex * landscapeHeightUnits) - topPaddingUnits
+            val rowOffsetUnits = -rowIndex * portraitWidthUnits
+            var xUnit = leftPaddingUnits + rowOffsetUnits
+            var patternIndex = 0
+            var currentYUnit = baseYUnit
+
+            while (xUnit < totalColumns) {
+                val yUnitForOccupancy = currentYUnit + topPaddingUnits
+                if (yUnitForOccupancy >= tRows || xUnit < 0) {
+                    xUnit++
+                    continue
+                }
+
+                val orientation = sequence[patternIndex]
+                val widthUnits: Int
+                val heightUnits: Int
+                if (orientation == PhotoOrientation.Portrait) {
+                    widthUnits = portraitWidthUnits
+                    heightUnits = portraitHeightUnits
+                } else {
+                    widthUnits = landscapeWidthUnits
+                    heightUnits = landscapeHeightUnits
+                }
+
+                if (!canPlace(plannedOccupied, xUnit, yUnitForOccupancy, widthUnits, heightUnits, totalColumns, tRows)) {
+                    xUnit++
+                    continue
+                }
+
+                markOccupied(plannedOccupied, xUnit, yUnitForOccupancy, widthUnits, heightUnits)
+
+                val x = (xUnit - leftPaddingUnits) * unitSize
+                val y = currentYUnit * unitSize
+                val w = widthUnits * unitSize
+                val h = heightUnits * unitSize
+
+                // Only add placements that are at least partially visible on the output canvas.
+                // Completely off-screen cells must not consume photo uses.
+                val isVisible = x + w > 0 && y + h > 0 && x < grid.width && y < grid.height
+
+                if (isVisible) {
+                    val targetColor = ImageProcessingUtils.getAverageColorRegionFastFromPixels(
+                        primaryPixels, primary.width, primary.height, x, y, w, h
+                    )
+                    val targetQuadrants = ImageProcessingUtils.getQuadrantColorsFromPixels(
+                        primaryPixels, primary.width, primary.height, x, y, w, h, clamp = true
+                    )
+
+                    placements.add(
+                        MosaicPlacement(
+                            yUnitForOccupancy, xUnit, x, y, w, h,
+                            orientation, targetColor, targetQuadrants
+                        )
+                    )
+                }
+
+                if (orientation == PhotoOrientation.Portrait && deltaUnits > 0) {
+                    currentYUnit += deltaUnits
+                }
+
+                patternIndex = (patternIndex + 1) % sequence.size
+                xUnit += widthUnits
+            }
+
+            val buildPercent = 15 + ((rowIndex + 1) * 5 / maxOf(1, rowCount))
+            reportProgress(onProgress, buildPercent, "Building placement map: row ${rowIndex + 1}")
+
+            rowIndex++
+        }
+
+        reportProgress(onProgress, 20, "Placement map complete (${placements.size} cells)")
+
+        var availablePlacements = placements.toMutableList()
+
+        if (useAllImages) {
+            reportProgress(onProgress, 20, "Placing all cell images (${cache.size} photos)")
+            for (item in cache) {
+                if (availablePlacements.isEmpty()) break
+                if (item.useCount >= maxUses) continue
+
+                var bestIndex = -1
+                var bestDistance = Double.MAX_VALUE
+
+                for (i in availablePlacements.indices) {
+                    val placement = availablePlacements[i]
+                    if (!isOrientationCompatible(item.orientation, placement.orientation)) continue
+
+                    val distance = ImageProcessingUtils.quadrantDistance(
+                        getQuadrants(item, placement.orientation),
+                        placement.targetQuadrants
+                    )
+                    if (distance < bestDistance) {
+                        bestDistance = distance
+                        bestIndex = i
+                    }
+                }
+
+                if (bestIndex >= 0) {
+                    val selectedPlacement = availablePlacements[bestIndex]
+                    if (placeParquetCell(
+                            canvas, item, selectedPlacement, colorAdjustPercent,
+                            occupied, unitSize, totalColumns, tRows
+                        )
+                    ) {
+                        trackUsePixelSpacing(item, lastUsedPixelPositions, usage, selectedPlacement.x, selectedPlacement.y)
+                    }
+                    availablePlacements.removeAt(bestIndex)
+                }
+            }
+        }
+
+        availablePlacements.shuffle()
+
+        reportProgress(onProgress, 25, "Matching images to cells (${availablePlacements.size} cells remaining)")
+        var processed = 0
+        var lastReported = 25
+
+        // Compute spacing in pixel coordinates so parquet respects minSpacing.
+        val rowSpacingPixels = if (minSpacing > 0) {
+            minSpacing * maxOf(grid.landscapeCellHeight, grid.portraitCellHeight).coerceAtLeast(1)
+        } else 0
+        val colSpacingPixels = if (minSpacing > 0) {
+            minSpacing * maxOf(grid.landscapeCellWidth, grid.portraitCellWidth).coerceAtLeast(1)
+        } else 0
+
+        for (placement in availablePlacements) {
+            if (!tryPlaceParquetCell(
+                    cache, canvas, lastUsedPixelPositions, usage, rowSpacingPixels, colSpacingPixels, maxUses,
+                    colorAdjustPercent, occupied, unitSize, totalColumns, tRows,
+                    placement, randomCellCandidates
+                )
+            ) {
+                continue
+            }
+
+            processed++
+            if (totalCells > 0) {
+                val percent = 25 + ((processed * 70) / totalCells)
+                if (percent != lastReported) {
+                    reportProgress(onProgress, percent, "Placing cells: ${processed}/${availablePlacements.size}")
+                    lastReported = percent
+                }
+            }
+        }
+
+        reportProgress(onProgress, 95, "Rendering final mosaic")
+
+        mosaic
+    }
+
+    /**
+     * Tries to place a parquet cell using occupancy grid.
+     * Exact translation of C# TryPlaceParquetCell.
+     */
+    private fun tryPlaceParquetCell(
+        cache: List<CellPhotoCache>,
+        canvas: Canvas,
+        lastUsedPositions: MutableMap<String, MutableList<Pair<Int, Int>>>,
+        usage: MutableList<CellUsage>,
+        rowSpacing: Int,
+        colSpacing: Int,
+        maxUses: Int,
+        colorAdjustPercent: Int,
+        occupied: Array<BooleanArray>,
+        unitSize: Int,
+        unitColumns: Int,
+        unitRows: Int,
+        placement: MosaicPlacement,
+        randomCellCandidates: Int
+    ): Boolean {
+        val widthUnits = maxOf(1, placement.width / unitSize)
+        val heightUnits = maxOf(1, placement.height / unitSize)
+
+        if (!canPlace(occupied, placement.col, placement.row, widthUnits, heightUnits, unitColumns, unitRows)) {
+            return false
+        }
+
+        // Try with normal constraints first
+        val match = findBestMatch(
+            cache, placement.targetQuadrants, maxUses, rowSpacing, colSpacing,
+            placement.y, placement.x, randomCellCandidates,
+            lastUsedPositions, placement.orientation
+        ) ?: return false
+
+        placeCell(canvas, match, placement, colorAdjustPercent)
+        markOccupied(occupied, placement.col, placement.row, widthUnits, heightUnits)
+        trackUsePixelSpacing(match, lastUsedPositions, usage, placement.x, placement.y)
+        return true
+    }
+
+    /**
+     * Places a parquet cell with occupancy check.
+     * Exact translation of C# PlaceParquetCell.
+     */
+    private fun placeParquetCell(
+        canvas: Canvas,
+        match: CellPhotoCache,
+        placement: MosaicPlacement,
+        colorAdjustPercent: Int,
+        occupied: Array<BooleanArray>,
+        unitSize: Int,
+        unitColumns: Int,
+        unitRows: Int
+    ): Boolean {
+        val widthUnits = maxOf(1, placement.width / unitSize)
+        val heightUnits = maxOf(1, placement.height / unitSize)
+
+        if (!canPlace(occupied, placement.col, placement.row, widthUnits, heightUnits, unitColumns, unitRows)) {
+            return false
+        }
+
+        placeCell(canvas, match, placement, colorAdjustPercent)
+        markOccupied(occupied, placement.col, placement.row, widthUnits, heightUnits)
+        return true
+    }
+
+    private fun isOrientationCompatible(photoOrientation: PhotoOrientation, requiredOrientation: PhotoOrientation): Boolean {
+        return when (requiredOrientation) {
+            PhotoOrientation.Landscape -> photoOrientation == PhotoOrientation.Landscape || photoOrientation == PhotoOrientation.Square
+            PhotoOrientation.Portrait -> photoOrientation == PhotoOrientation.Portrait || photoOrientation == PhotoOrientation.Square
+            else -> true
+        }
     }
 
     /**
@@ -967,7 +1247,8 @@ class CoreMosaicGenerationService {
         cache: List<CellPhotoCache>,
         target: CellQuadrantColors,
         maxUses: Int,
-        minSpacing: Int,
+        rowSpacing: Int,
+        colSpacing: Int,
         row: Int,
         col: Int,
         candidateCount: Int,
@@ -983,12 +1264,13 @@ class CoreMosaicGenerationService {
                 item.orientation != PhotoOrientation.Square
             ) continue
 
-            if (minSpacing > 0 && lastUsedPositions.containsKey(item.path)) {
+            if ((rowSpacing > 0 || colSpacing > 0) && lastUsedPositions.containsKey(item.path)) {
                 val positions = lastUsedPositions[item.path]!!
                 if (positions.any {
-                    kotlin.math.abs(it.first - row) <= minSpacing &&
-                    kotlin.math.abs(it.second - col) <= minSpacing
-                }) {
+                        kotlin.math.abs(it.first - row) <= rowSpacing &&
+                        kotlin.math.abs(it.second - col) <= colSpacing
+                    }
+                ) {
                     continue
                 }
             }
@@ -1042,10 +1324,8 @@ class CoreMosaicGenerationService {
      */
     private fun getCellBitmap(cache: CellPhotoCache, orientation: PhotoOrientation): Bitmap? {
         return when (orientation) {
-            PhotoOrientation.Portrait -> cache.resizedPortraitBitmap
-                ?: cache.resizedLandscapeBitmap
-            else -> cache.resizedLandscapeBitmap
-                ?: cache.resizedPortraitBitmap
+            PhotoOrientation.Portrait -> cache.resizedPortraitBitmap ?: cache.resizedLandscapeBitmap
+            else -> cache.resizedLandscapeBitmap ?: cache.resizedPortraitBitmap
         }
     }
 
@@ -1067,17 +1347,18 @@ class CoreMosaicGenerationService {
     }
 
     /**
-     * Builds the parquet pattern sequence.
+     * Tracks usage of a cell photo with pixel-based spacing.
      */
-    private fun buildParquetSequence(pattern: PatternInfo): List<PhotoOrientation> {
-        val sequence = mutableListOf<PhotoOrientation>()
-        repeat(maxOf(1, pattern.landscapeCount)) {
-            sequence.add(PhotoOrientation.Landscape)
-        }
-        repeat(maxOf(1, pattern.portraitCount)) {
-            sequence.add(PhotoOrientation.Portrait)
-        }
-        return sequence
+    private fun trackUsePixelSpacing(
+        match: CellPhotoCache,
+        lastUsedPositions: MutableMap<String, MutableList<Pair<Int, Int>>>,
+        usage: MutableList<CellUsage>,
+        x: Int,
+        y: Int
+    ) {
+        match.useCount++
+        lastUsedPositions.getOrPut(match.path) { mutableListOf() }.add(Pair(y, x))
+        usage.add(CellUsage(match.path, x, y))
     }
 
     /**
@@ -1175,6 +1456,38 @@ class CoreMosaicGenerationService {
     }
 
     /**
+     * Builds the parquet pattern sequence.
+     */
+    private fun buildParquetSequence(pattern: PatternInfo): List<PhotoOrientation> {
+        val sequence = mutableListOf<PhotoOrientation>()
+        repeat(maxOf(1, pattern.landscapeCount)) {
+            sequence.add(PhotoOrientation.Landscape)
+        }
+        repeat(maxOf(1, pattern.portraitCount)) {
+            sequence.add(PhotoOrientation.Portrait)
+        }
+        return sequence
+    }
+
+    private fun resolvePatternInfo(pattern: PatternInfo, photos: List<CellPhoto>): PatternInfo {
+        if (pattern.kind != PatternKind.Parquet) return pattern
+
+        val counts = countAvailablePhotos(photos, pattern)
+        val landscape = counts.landscape
+        val portrait = counts.portrait
+
+        if (landscape <= 0 || portrait <= 0) return pattern
+
+        return if (landscape >= portrait) {
+            val ratio = maxOf(1, landscape / portrait)
+            PatternInfo(PatternKind.Parquet, ratio, 1)
+        } else {
+            val ratio = maxOf(1, portrait / landscape)
+            PatternInfo(PatternKind.Parquet, 1, ratio)
+        }
+    }
+
+    /**
      * Reports progress to callback.
      */
     private fun reportProgress(onProgress: ((MosaicGenerationProgress) -> Unit)?, percent: Int, stage: String) {
@@ -1211,6 +1524,12 @@ class CoreMosaicGenerationService {
         }
     }
 }
+
+
+
+
+
+
 
 
 

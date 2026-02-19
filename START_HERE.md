@@ -51,8 +51,8 @@ open API_REFERENCE.md
 
 ### 2. Try the Service (Copy & Paste)
 ```kotlin
-import com.storrs.photomosaiccreatorandroid.services.CoreMosaicGenerationService
-import com.storrs.photomosaiccreatorandroid.models.*
+//import com.storrs.photomosaiccreatorandroid.services.CoreMosaicGenerationService
+//import com.storrs.photomosaiccreatorandroid.models.*
 
 // Create service
 val service = CoreMosaicGenerationService()
