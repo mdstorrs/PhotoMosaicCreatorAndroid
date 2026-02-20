@@ -11,15 +11,21 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import android.util.Log
+import android.provider.OpenableColumns
+import android.content.Context
+import android.database.Cursor
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.rememberTransformableState
 import androidx.compose.foundation.gestures.transformable
 import androidx.compose.foundation.layout.*
@@ -35,8 +41,19 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.changedToUp
+import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.foundation.gestures.detectTapGestures
+// import androidx.compose.ui.input.pointer.awaitPointerEventScope
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
@@ -53,11 +70,22 @@ import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.ui.text.font.FontWeight
+import kotlin.math.min
 import kotlin.math.roundToInt
 import android.os.Environment
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.core.content.FileProvider
 //import com.storrs.photomosaiccreatorandroid.BuildConfig
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import com.storrs.photomosaiccreatorandroid.preview.BrushSize
+import com.storrs.photomosaiccreatorandroid.preview.applyMaskToOverlay
+import com.storrs.photomosaiccreatorandroid.preview.brushRadiusFor
+import com.storrs.photomosaiccreatorandroid.preview.combineMasks
+import com.storrs.photomosaiccreatorandroid.preview.createEmptyMask
+import com.storrs.photomosaiccreatorandroid.preview.createSolidMask
+import com.storrs.photomosaiccreatorandroid.preview.generateFaceMaskBitmap
+import com.storrs.photomosaiccreatorandroid.preview.paintSoftBrushOnMask
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -102,8 +130,8 @@ fun MosaicGeneratorScreen(viewModel: MosaicViewModel) {
     var debugReportText by remember { mutableStateOf("") }
     var previewResult by remember { mutableStateOf<com.storrs.photomosaiccreatorandroid.models.MosaicResult?>(null) }
     var lastAutoPreviewPath by rememberSaveable { mutableStateOf<String?>(null) }
-    var overlayOpacity by rememberSaveable { mutableStateOf(0.5f) }
-    var blurRadius by rememberSaveable { mutableStateOf(2f) }
+    var overlayOpacity by rememberSaveable { mutableStateOf(0.3f) }
+    var faceOverlayBoost by rememberSaveable { mutableStateOf(0.5f) }
 
     val goBack: () -> Unit = {
         currentStep = when (currentStep) {
@@ -167,9 +195,9 @@ fun MosaicGeneratorScreen(viewModel: MosaicViewModel) {
                     result = previewResult!!,
                     primaryImagePath = primaryImagePath,
                     overlayOpacity = overlayOpacity,
-                    blurRadius = blurRadius,
+                    faceOverlayBoost = faceOverlayBoost,
                     onOverlayOpacityChange = { overlayOpacity = it },
-                    onBlurRadiusChange = { blurRadius = it },
+                    onFaceOverlayBoostChange = { faceOverlayBoost = it },
                     onClose = goBack,
                     onStartAgain = {
                         viewModel.reset()
@@ -501,9 +529,9 @@ fun MosaicPreviewScreen(
     result: com.storrs.photomosaiccreatorandroid.models.MosaicResult,
     primaryImagePath: String?,
     overlayOpacity: Float,
-    blurRadius: Float,
+    faceOverlayBoost: Float,
     onOverlayOpacityChange: (Float) -> Unit,
-    onBlurRadiusChange: (Float) -> Unit,
+    onFaceOverlayBoostChange: (Float) -> Unit,
     onClose: () -> Unit,
     onStartAgain: () -> Unit
 ) {
@@ -512,83 +540,415 @@ fun MosaicPreviewScreen(
     var saveMessage by remember { mutableStateOf<String?>(null) }
     var isSaving by remember { mutableStateOf(false) }
 
+    // Tab state: 0 = Overlay, 1 = Face Enhance, 2 = Feature Paint
+    var activeTab by rememberSaveable { mutableStateOf(0) }
+
+    // Face enhance
+    var faceEnhanceEnabled by rememberSaveable { mutableStateOf(false) }
+    var faceRadiusScale by rememberSaveable { mutableStateOf(1.5f) }  // 0.5 = eyes/mouth only, 3.0 = full head
+
+    // Paint state
+    var brushSize by rememberSaveable { mutableStateOf(BrushSize.Medium) }
+    var brushIntensity by rememberSaveable { mutableStateOf(0.4f) }        // how much white each stroke adds
+    var paintOverlayStrength by rememberSaveable { mutableStateOf(0.2f) }  // slider: how strongly the mask is rendered
+    var paintHasContent by remember { mutableStateOf(false) }
+    var paintMaskBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var paintMaskUndo by remember { mutableStateOf<Bitmap?>(null) }        // one-step undo snapshot
+    // Direct state for the rendered paint overlay — no produceState
+    var paintOverlayImage by remember { mutableStateOf<ImageBitmap?>(null) }
+
+    // Derived: painting is active only when on the Paint tab
+    val isPainting = activeTab == 2
+
+    // Paint mask at lower resolution for responsive brush strokes
+    val paintMaskMaxSide = 1024
+
     val blurredOverlayPath by produceState<String?>(
         initialValue = null,
-        key1 = primaryImagePath,
-        key2 = blurRadius
+        key1 = primaryImagePath
     ) {
         value = if (primaryImagePath.isNullOrBlank()) {
             null
         } else {
-            prepareBlurredOverlay(context, primaryImagePath, blurRadius)
+            prepareBlurredOverlay(context, primaryImagePath, 0f)
         }
     }
 
     val mosaicFile = remember(result.temporaryFilePath) {
         result.temporaryFilePath?.let { File(it) }
     }
-    val overlayFile = remember(blurredOverlayPath) {
-        blurredOverlayPath?.let { File(it) }
+
+    val mosaicSize = remember(mosaicFile?.absolutePath) {
+        getImageSize(mosaicFile?.absolutePath)
     }
 
+    LaunchedEffect(mosaicSize) {
+        val size = mosaicSize ?: return@LaunchedEffect
+        val maskScale = paintMaskMaxSide.toFloat() / maxOf(size.first, size.second).toFloat()
+        val mw = if (maskScale < 1f) (size.first * maskScale).toInt().coerceAtLeast(1) else size.first
+        val mh = if (maskScale < 1f) (size.second * maskScale).toInt().coerceAtLeast(1) else size.second
+        paintMaskBitmap = createEmptyMask(mw, mh)
+        paintHasContent = false
+        paintOverlayImage = null
+    }
+
+    val faceMaskBitmap by produceState<Bitmap?>(
+        initialValue = null,
+        keys = arrayOf(primaryImagePath, mosaicSize, faceEnhanceEnabled, faceRadiusScale)
+    ) {
+        val size = mosaicSize
+        if (!faceEnhanceEnabled || primaryImagePath.isNullOrBlank() || size == null) {
+            value = null
+        } else {
+            value = withContext(Dispatchers.Default) {
+                val scaled = loadScaledBitmap(primaryImagePath, 1024)
+                val maskScale = 1024f / maxOf(size.first, size.second).toFloat()
+                val mw = if (maskScale < 1f) (size.first * maskScale).toInt().coerceAtLeast(1) else size.first
+                val mh = if (maskScale < 1f) (size.second * maskScale).toInt().coerceAtLeast(1) else size.second
+                val mask = if (scaled != null) {
+                    generateFaceMaskBitmap(scaled, mw, mh, faceRadiusScale)
+                } else null
+                scaled?.recycle()
+                mask
+            }
+        }
+    }
+
+    val overlayBaseBitmap by produceState<Bitmap?>(
+        initialValue = null,
+        key1 = blurredOverlayPath,
+        key2 = mosaicSize
+    ) {
+        val size = mosaicSize
+        val path = blurredOverlayPath
+        if (size == null || path.isNullOrBlank()) {
+            value = null
+        } else {
+            value = withContext(Dispatchers.Default) {
+                // Cap overlay image to 1024px long side
+                val overlayMaxSide = 1024
+                val scale = overlayMaxSide.toFloat() / maxOf(size.first, size.second).toFloat()
+                val tw = if (scale < 1f) (size.first * scale).toInt().coerceAtLeast(1) else size.first
+                val th = if (scale < 1f) (size.second * scale).toInt().coerceAtLeast(1) else size.second
+                loadBitmapScaled(path, tw, th)
+            }
+        }
+    }
+
+    // Face-only masked overlay (controlled by face enhance slider)
+    val faceMaskedOverlayBitmap by produceState<ImageBitmap?>(
+        initialValue = null,
+        key1 = overlayBaseBitmap,
+        key2 = faceMaskBitmap,
+        key3 = faceEnhanceEnabled
+    ) {
+        val base = overlayBaseBitmap
+        val faceMask = if (faceEnhanceEnabled) faceMaskBitmap else null
+        if (base == null || faceMask == null) {
+            value = null
+        } else {
+            val scaledMask = Bitmap.createScaledBitmap(faceMask, base.width, base.height, true)
+            val masked = applyMaskToOverlay(base, scaledMask)
+            if (scaledMask != faceMask) scaledMask.recycle()
+            value = masked.asImageBitmap()
+        }
+    }
+
+    // Rebuild the paint overlay bitmap from the mask — called directly after each paint stroke
+    fun rebuildPaintOverlay() {
+        val base = overlayBaseBitmap ?: return
+        val mask = paintMaskBitmap ?: return
+        if (!paintHasContent) {
+            paintOverlayImage = null
+            return
+        }
+        val scaledMask = Bitmap.createScaledBitmap(mask, base.width, base.height, true)
+        val masked = applyMaskToOverlay(base, scaledMask)
+        if (scaledMask != mask) scaledMask.recycle()
+        paintOverlayImage = masked.asImageBitmap()
+    }
+
+    // Save an undo snapshot before the first stroke of each gesture
+    var undoSavedForGesture by remember { mutableStateOf(false) }
+
+    val handlePaintAt: (Float, Float) -> Unit = handlePaintAt@{ x, y ->
+        if (!isPainting) return@handlePaintAt
+        val size = mosaicSize
+        val mask = paintMaskBitmap
+        if (size == null || mask == null) return@handlePaintAt
+
+        // Save undo snapshot once per gesture (first stroke)
+        if (!undoSavedForGesture) {
+            paintMaskUndo = mask.copy(mask.config ?: Bitmap.Config.ARGB_8888, true)
+            undoSavedForGesture = true
+        }
+
+        // mapToImage returns coordinates in full mosaic-resolution space,
+        // but the paint mask is at capped preview resolution — scale down
+        val scaleX = mask.width.toFloat() / size.first.toFloat()
+        val scaleY = mask.height.toFloat() / size.second.toFloat()
+        val maskX = x * scaleX
+        val maskY = y * scaleY
+
+        val radius = brushRadiusFor(brushSize, mask.width, mask.height)
+        paintSoftBrushOnMask(mask, maskX, maskY, radius, brushIntensity)
+        paintHasContent = true
+        rebuildPaintOverlay()
+    }
+
+    // Reset undo flag when gesture ends (tab switch or new gesture will reset)
+    val handlePaintGestureEnd: () -> Unit = {
+        undoSavedForGesture = false
+    }
+
+    // ── LAYOUT ──────────────────────────────────────────────
     Column(
         modifier = Modifier
             .fillMaxSize()
             .statusBarsPadding()
             .navigationBarsPadding()
-            .background(MaterialTheme.colorScheme.background)
-            .padding(12.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+            .background(Color(0xFFF7F5F0))
     ) {
+        // ── Header row ──
         Row(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
+            TextButton(onClick = onClose) { Text("← Back") }
+            Spacer(modifier = Modifier.weight(1f))
             Text(
-                text = "Preview & Tweak",
-                style = MaterialTheme.typography.titleLarge,
-                modifier = Modifier.weight(1f)
+                text = "Preview",
+                style = MaterialTheme.typography.titleMedium
             )
-            TextButton(onClick = onClose) {
-                Text("Back")
+            Spacer(modifier = Modifier.weight(1f))
+            // invisible spacer to balance the Back button
+            Spacer(modifier = Modifier.width(64.dp))
+        }
+
+        // ── Mosaic canvas (takes remaining space between header and controls) ──
+        MosaicZoomableCanvas(
+            mosaicFile = mosaicFile,
+            baseOverlayBitmap = overlayBaseBitmap?.asImageBitmap(),
+            faceMaskedOverlayBitmap = faceMaskedOverlayBitmap,
+            paintMaskedOverlayBitmap = paintOverlayImage,
+            backgroundOverlayOpacity = overlayOpacity,
+            faceOverlayOpacity = faceOverlayBoost,
+            paintOverlayStrength = paintOverlayStrength,
+            paintModeEnabled = isPainting,
+            brushSize = brushSize,
+            mosaicWidth = mosaicSize?.first ?: 0,
+            mosaicHeight = mosaicSize?.second ?: 0,
+            onPaintAt = handlePaintAt,
+            onPaintGestureEnd = handlePaintGestureEnd,
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .padding(horizontal = 4.dp)
+        )
+
+        // ── Tab bar ──
+        val tabLabels = listOf("Overlay", "Face Enhance", "Feature Paint")
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 8.dp, vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            tabLabels.forEachIndexed { index, label ->
+                val isActive = activeTab == index
+                val bgColor = if (isActive) Color(0xFF7FB7E6) else Color(0xFFE0E0E0)
+                val txtColor = if (isActive) Color.White else Color(0xFF555555)
+                Button(
+                    onClick = { activeTab = index },
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = bgColor,
+                        contentColor = txtColor
+                    ),
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(40.dp),
+                    contentPadding = PaddingValues(horizontal = 4.dp, vertical = 0.dp)
+                ) {
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.labelMedium,
+                        maxLines = 1
+                    )
+                }
             }
         }
 
-        MosaicZoomableCanvas(
-            mosaicFile = mosaicFile,
-            overlayFile = overlayFile,
-            overlayOpacity = overlayOpacity,
-            modifier = Modifier.weight(1f)
-        )
+        // ── Tab content ──
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp)
+                .padding(bottom = 4.dp),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            when (activeTab) {
+                // ── TAB 0: Overlay ──
+                0 -> {
+                    PreviewSlider(
+                        label = "Overlay Strength",
+                        value = overlayOpacity,
+                        onValueChange = onOverlayOpacityChange,
+                        range = 0f..1f,
+                        displayPercent = true
+                    )
+                }
+                // ── TAB 1: Face Enhance ──
+                1 -> {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Switch(
+                            checked = faceEnhanceEnabled,
+                            onCheckedChange = { faceEnhanceEnabled = it }
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Enable Face Detection", style = MaterialTheme.typography.bodyMedium)
+                    }
+                    if (faceEnhanceEnabled) {
+                        PreviewSlider(
+                            label = "Face Overlay Strength",
+                            value = faceOverlayBoost,
+                            onValueChange = onFaceOverlayBoostChange,
+                            range = 0f..1f,
+                            displayPercent = true
+                        )
+                        val radiusLabel = when {
+                            faceRadiusScale <= 0.7f -> "Eyes & Mouth"
+                            faceRadiusScale <= 1.2f -> "Face Only"
+                            faceRadiusScale <= 2.0f -> "Head"
+                            faceRadiusScale <= 3.5f -> "Full Head"
+                            else -> "Maximum"
+                        }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = { faceRadiusScale = (faceRadiusScale - 0.25f).coerceAtLeast(0.5f) },
+                                enabled = faceRadiusScale > 0.5f,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("Less")
+                            }
+                            Text(
+                                text = radiusLabel,
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.widthIn(min = 90.dp),
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                            OutlinedButton(
+                                onClick = { faceRadiusScale = (faceRadiusScale + 0.25f).coerceAtMost(5f) },
+                                enabled = faceRadiusScale < 5f,
+                                modifier = Modifier.weight(1f)
+                            ) {
+                                Text("More")
+                            }
+                        }
+                    }
+                }
+                // ── TAB 2: Feature Paint ──
+                2 -> {
+                    Text(
+                        text = "Draw on the mosaic to reveal the original image. Two fingers to pan/zoom.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = Color(0xFF888888)
+                    )
+                    PreviewSlider(
+                        label = "Paint Overlay Strength",
+                        value = paintOverlayStrength,
+                        onValueChange = { paintOverlayStrength = it.coerceIn(0f, 1f) },
+                        range = 0f..1f,
+                        displayPercent = true
+                    )
+                    PreviewSlider(
+                        label = "Brush Intensity",
+                        value = brushIntensity,
+                        onValueChange = { brushIntensity = it.coerceIn(0.05f, 1f) },
+                        range = 0.05f..1f,
+                        displayPercent = true
+                    )
+                    Text("Brush Size", style = MaterialTheme.typography.bodySmall)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        BrushSizeButton(
+                            label = "Small",
+                            selected = brushSize == BrushSize.Small,
+                            onClick = { brushSize = BrushSize.Small },
+                            modifier = Modifier.weight(1f)
+                        )
+                        BrushSizeButton(
+                            label = "Medium",
+                            selected = brushSize == BrushSize.Medium,
+                            onClick = { brushSize = BrushSize.Medium },
+                            modifier = Modifier.weight(1f)
+                        )
+                        BrushSizeButton(
+                            label = "Large",
+                            selected = brushSize == BrushSize.Large,
+                            onClick = { brushSize = BrushSize.Large },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        OutlinedButton(
+                            onClick = {
+                                val undo = paintMaskUndo
+                                if (undo != null) {
+                                    paintMaskBitmap = undo
+                                    paintMaskUndo = null
+                                    paintHasContent = true
+                                    rebuildPaintOverlay()
+                                }
+                            },
+                            enabled = paintMaskUndo != null,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Undo")
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                val size = mosaicSize
+                                if (size != null) {
+                                    val maskScale = paintMaskMaxSide.toFloat() / maxOf(size.first, size.second).toFloat()
+                                    val mw = if (maskScale < 1f) (size.first * maskScale).toInt().coerceAtLeast(1) else size.first
+                                    val mh = if (maskScale < 1f) (size.second * maskScale).toInt().coerceAtLeast(1) else size.second
+                                    paintMaskBitmap = createEmptyMask(mw, mh)
+                                    paintHasContent = false
+                                    paintOverlayImage = null
+                                    paintMaskUndo = null
+                                }
+                            },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Text("Clear All")
+                        }
+                    }
+                }
+            }
+        }
 
-        Text(
-            text = "Overlay: ${(overlayOpacity * 100).roundToInt()}%",
-            style = MaterialTheme.typography.bodySmall
-        )
-        Slider(
-            value = overlayOpacity,
-            onValueChange = onOverlayOpacityChange,
-            valueRange = 0f..1f,
-            modifier = Modifier.height(48.dp)
-        )
-
-        Text(
-            text = "Blur: ${blurRadius.roundToInt()}",
-            style = MaterialTheme.typography.bodySmall
-        )
-        Slider(
-            value = blurRadius,
-            onValueChange = onBlurRadiusChange,
-            valueRange = 0f..25f,
-            modifier = Modifier.height(48.dp)
-        )
-
+        // ── Save message ──
         if (saveMessage != null) {
             Text(
                 text = saveMessage!!,
                 style = MaterialTheme.typography.labelSmall,
                 modifier = Modifier
                     .fillMaxWidth()
+                    .padding(horizontal = 12.dp)
                     .background(
                         color = if (saveMessage!!.startsWith("✓"))
                             MaterialTheme.colorScheme.primaryContainer
@@ -600,9 +960,12 @@ fun MosaicPreviewScreen(
             )
         }
 
+        // ── Bottom toolbar: Save / Share / Start again ──
         Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             Button(
                 onClick = {
@@ -611,8 +974,12 @@ fun MosaicPreviewScreen(
                         val exportFile = createCompositeForExport(
                             context = context,
                             mosaicFile = mosaicFile,
-                            overlayFile = overlayFile,
-                            overlayOpacity = overlayOpacity
+                            baseOverlayBitmap = overlayBaseBitmap,
+                            faceMaskedBitmap = faceMaskedOverlayBitmap?.asAndroidBitmap(),
+                            paintMaskedBitmap = paintOverlayImage?.asAndroidBitmap(),
+                            backgroundOpacity = overlayOpacity,
+                            faceOpacity = faceOverlayBoost,
+                            paintOpacity = paintOverlayStrength
                         ) ?: mosaicFile
                         val savedPath = viewModelSaveToGallery(context, exportFile)
                         saveMessage = if (savedPath != null) {
@@ -625,10 +992,11 @@ fun MosaicPreviewScreen(
                 },
                 modifier = Modifier
                     .weight(1f)
-                    .height(56.dp),
-                enabled = mosaicFile != null && !isSaving
+                    .height(50.dp),
+                enabled = mosaicFile != null && !isSaving,
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7FB7E6))
             ) {
-                Text(if (isSaving) "Saving..." else "Save to Gallery")
+                Text(if (isSaving) "Saving..." else "Save", style = MaterialTheme.typography.titleSmall)
             }
             Button(
                 onClick = {
@@ -636,8 +1004,12 @@ fun MosaicPreviewScreen(
                         createCompositeForExport(
                             context = context,
                             mosaicFile = mosaicFile,
-                            overlayFile = overlayFile,
-                            overlayOpacity = overlayOpacity
+                            baseOverlayBitmap = overlayBaseBitmap,
+                            faceMaskedBitmap = faceMaskedOverlayBitmap?.asAndroidBitmap(),
+                            paintMaskedBitmap = paintOverlayImage?.asAndroidBitmap(),
+                            backgroundOpacity = overlayOpacity,
+                            faceOpacity = faceOverlayBoost,
+                            paintOpacity = paintOverlayStrength
                         ) ?: mosaicFile
                     } else {
                         null
@@ -646,44 +1018,96 @@ fun MosaicPreviewScreen(
                 },
                 modifier = Modifier
                     .weight(1f)
-                    .height(56.dp),
-                enabled = mosaicFile != null
+                    .height(50.dp),
+                enabled = mosaicFile != null,
+                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7FB7E6))
             ) {
-                Text("Share")
+                Text("Share", style = MaterialTheme.typography.titleSmall)
+            }
+            OutlinedButton(
+                onClick = onStartAgain,
+                modifier = Modifier
+                    .weight(1f)
+                    .height(50.dp)
+            ) {
+                Text("Start Again", style = MaterialTheme.typography.titleSmall)
             }
         }
+    }
+}
 
-        Button(
-            onClick = onStartAgain,
+/** Reusable slider row for the preview tabs. */
+@Composable
+private fun PreviewSlider(
+    label: String,
+    value: Float,
+    onValueChange: (Float) -> Unit,
+    range: ClosedFloatingPointRange<Float>,
+    displayPercent: Boolean
+) {
+    val displayValue = if (displayPercent) "${(value * 100).roundToInt()}%" else "${value.roundToInt()}"
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = "$label: $displayValue",
+            style = MaterialTheme.typography.bodySmall,
+            modifier = Modifier.width(160.dp)
+        )
+        Slider(
+            value = value,
+            onValueChange = onValueChange,
+            valueRange = range,
             modifier = Modifier
-                .fillMaxWidth()
-                .height(56.dp)
-        ) {
-            Text("Start again")
-        }
+                .weight(1f)
+                .height(40.dp)
+        )
+    }
+}
+
+@Composable
+private fun BrushSizeButton(label: String, selected: Boolean, onClick: () -> Unit, modifier: Modifier = Modifier) {
+    val colors = if (selected) {
+        ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
+    } else {
+        ButtonDefaults.outlinedButtonColors()
+    }
+    OutlinedButton(
+        onClick = onClick,
+        modifier = modifier,
+        colors = colors
+    ) {
+        Text(label)
     }
 }
 
 private fun createCompositeForExport(
     context: android.content.Context,
     mosaicFile: File,
-    overlayFile: File?,
-    overlayOpacity: Float
+    baseOverlayBitmap: Bitmap?,
+    faceMaskedBitmap: Bitmap?,
+    paintMaskedBitmap: Bitmap?,
+    backgroundOpacity: Float,
+    faceOpacity: Float,
+    paintOpacity: Float = 1f
 ): File? {
-    if (overlayFile == null || overlayOpacity <= 0f) return mosaicFile
-    val opacityPercent = (overlayOpacity.coerceIn(0f, 1f) * 100f).roundToInt()
+    val hasBackground = baseOverlayBitmap != null && backgroundOpacity > 0f
+    val hasFace = faceMaskedBitmap != null && faceOpacity > 0f
+    val hasPaint = paintMaskedBitmap != null && paintOpacity > 0f
+    if (!hasBackground && !hasFace && !hasPaint) return mosaicFile
+
+    val bgPct = (backgroundOpacity.coerceIn(0f, 1f) * 100f).roundToInt()
+    val facePct = (faceOpacity.coerceIn(0f, 1f) * 100f).roundToInt()
+    val paintPct = (paintOpacity.coerceIn(0f, 1f) * 100f).roundToInt()
+    val paintHash = if (hasPaint) paintMaskedBitmap.hashCode() else 0
     val cacheFile = File(
         context.cacheDir,
-        "mosaic_composite_${mosaicFile.nameWithoutExtension}_${overlayFile.nameWithoutExtension}_${opacityPercent}.jpg"
+        "mosaic_composite_${mosaicFile.nameWithoutExtension}_bg${bgPct}_f${facePct}_p${paintPct}_${paintHash}.jpg"
     )
     if (cacheFile.exists()) return cacheFile
 
     val mosaicBitmap = BitmapFactory.decodeFile(mosaicFile.absolutePath) ?: return null
-    val overlayBitmap = BitmapFactory.decodeFile(overlayFile.absolutePath)
-        ?: run {
-            mosaicBitmap.recycle()
-            return null
-        }
 
     val output = Bitmap.createBitmap(
         mosaicBitmap.width,
@@ -693,18 +1117,37 @@ private fun createCompositeForExport(
     val canvas = Canvas(output)
     canvas.drawBitmap(mosaicBitmap, 0f, 0f, null)
 
-    val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        alpha = (overlayOpacity.coerceIn(0f, 1f) * 255f).roundToInt()
-    }
     val dst = Rect(0, 0, mosaicBitmap.width, mosaicBitmap.height)
-    canvas.drawBitmap(overlayBitmap, null, dst, paint)
+
+    // Layer 1: uniform background overlay everywhere
+    if (hasBackground) {
+        val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            alpha = (backgroundOpacity.coerceIn(0f, 1f) * 255f).roundToInt()
+        }
+        canvas.drawBitmap(baseOverlayBitmap!!, null, dst, bgPaint)
+    }
+
+    // Layer 2: face-masked overlay
+    if (hasFace) {
+        val facePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            alpha = (faceOpacity.coerceIn(0f, 1f) * 255f).roundToInt()
+        }
+        canvas.drawBitmap(faceMaskedBitmap!!, null, dst, facePaint)
+    }
+
+    // Layer 3: paint-masked overlay
+    if (hasPaint) {
+        val pPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            alpha = (paintOpacity.coerceIn(0f, 1f) * 255f).roundToInt()
+        }
+        canvas.drawBitmap(paintMaskedBitmap!!, null, dst, pPaint)
+    }
 
     cacheFile.outputStream().use { out ->
         output.compress(Bitmap.CompressFormat.JPEG, 95, out)
     }
 
     mosaicBitmap.recycle()
-    overlayBitmap.recycle()
     output.recycle()
 
     return cacheFile
@@ -713,12 +1156,25 @@ private fun createCompositeForExport(
 @Composable
 private fun MosaicZoomableCanvas(
     mosaicFile: File?,
-    overlayFile: File?,
-    overlayOpacity: Float,
+    baseOverlayBitmap: ImageBitmap?,
+    faceMaskedOverlayBitmap: ImageBitmap?,
+    paintMaskedOverlayBitmap: ImageBitmap?,
+    backgroundOverlayOpacity: Float,
+    faceOverlayOpacity: Float,
+    paintOverlayStrength: Float,
+    paintModeEnabled: Boolean,
+    brushSize: BrushSize,
+    mosaicWidth: Int,
+    mosaicHeight: Int,
+    onPaintAt: (Float, Float) -> Unit,
+    onPaintGestureEnd: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var scale by remember { mutableStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
+    var viewSize by remember { mutableStateOf(IntSize.Zero) }
+
+    // Only use transformable when NOT in paint mode — it captures single-finger drags for pan
     val transformableState = rememberTransformableState { zoomChange, offsetChange, _ ->
         scale = (scale * zoomChange).coerceIn(1f, 8f)
         offset += offsetChange
@@ -729,7 +1185,73 @@ private fun MosaicZoomableCanvas(
             .fillMaxWidth()
             .clip(MaterialTheme.shapes.small)
             .background(MaterialTheme.colorScheme.surfaceVariant)
-            .transformable(state = transformableState)
+            .onSizeChanged { viewSize = it }
+            .pointerInput(paintModeEnabled) {
+                if (!paintModeEnabled) {
+                    detectTapGestures(
+                        onDoubleTap = {
+                            scale = 1f
+                            offset = Offset.Zero
+                        }
+                    )
+                }
+            }
+            .pointerInput(paintModeEnabled, brushSize, mosaicWidth, mosaicHeight, scale, offset, viewSize) {
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    if (!paintModeEnabled) return@awaitEachGesture
+
+                    val startPos = mapToImage(
+                        down.position,
+                        viewSize,
+                        mosaicWidth,
+                        mosaicHeight,
+                        scale,
+                        offset
+                    )
+                    if (startPos != null) onPaintAt(startPos.x, startPos.y)
+                    // Consume to prevent transformable from picking up single-finger drag
+                    down.consume()
+
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val pointerCount = event.changes.count { it.pressed }
+
+                        if (pointerCount > 1) {
+                            // Multi-touch detected — stop painting and let transformable handle it
+                            break
+                        }
+
+                        val change = event.changes.firstOrNull() ?: break
+                        if (change.changedToUp()) break
+
+                        if (change.positionChanged()) {
+                            val pos = mapToImage(
+                                change.position,
+                                viewSize,
+                                mosaicWidth,
+                                mosaicHeight,
+                                scale,
+                                offset
+                            )
+                            if (pos != null) onPaintAt(pos.x, pos.y)
+                            // Consume to prevent pan
+                            change.consume()
+                        }
+                    }
+                    // Gesture ended — notify so undo snapshot is ready for next gesture
+                    onPaintGestureEnd()
+                }
+            }
+            .then(
+                if (!paintModeEnabled) {
+                    // Normal mode: full transformable (pinch zoom + single-finger pan)
+                    Modifier.transformable(state = transformableState)
+                } else {
+                    // Paint mode: only allow multi-touch pinch zoom via transformable
+                    Modifier.transformable(state = transformableState)
+                }
+            )
     ) {
         Box(
             modifier = Modifier
@@ -754,91 +1276,93 @@ private fun MosaicZoomableCanvas(
                 )
             }
 
-            if (overlayFile != null && overlayOpacity > 0f) {
-                AsyncImage(
-                    model = ImageRequest.Builder(LocalContext.current)
-                        .data(overlayFile)
-                        .size(Size.ORIGINAL)
-                        .build(),
-                    contentDescription = "Original overlay",
+            // Layer 1: uniform background overlay across the entire mosaic
+            if (baseOverlayBitmap != null && backgroundOverlayOpacity > 0f) {
+                Image(
+                    bitmap = baseOverlayBitmap,
+                    contentDescription = "Background overlay",
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Fit,
-                    alpha = overlayOpacity
+                    alpha = backgroundOverlayOpacity
+                )
+            }
+
+            // Layer 2: face-masked overlay (controlled by face enhance slider)
+            if (faceMaskedOverlayBitmap != null && faceOverlayOpacity > 0f) {
+                Image(
+                    bitmap = faceMaskedOverlayBitmap,
+                    contentDescription = "Face detail overlay",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Fit,
+                    alpha = faceOverlayOpacity
+                )
+            }
+
+            // Layer 3: paint-masked overlay (controlled by Paint Overlay Strength slider)
+            if (paintMaskedOverlayBitmap != null && paintOverlayStrength > 0f) {
+                Image(
+                    bitmap = paintMaskedOverlayBitmap,
+                    contentDescription = "Painted detail overlay",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Fit,
+                    alpha = paintOverlayStrength
                 )
             }
         }
     }
 }
 
-private fun viewModelSaveToGallery(context: android.content.Context, file: File): String? {
-    return try {
-        val picturesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
-        val mosaicDir = File(picturesDir, "PhotoMosaics")
-        if (!mosaicDir.exists()) {
-            mosaicDir.mkdirs()
-        }
+private fun mapToImage(
+    position: Offset,
+    viewSize: IntSize,
+    imageWidth: Int,
+    imageHeight: Int,
+    scale: Float,
+    offset: Offset
+): Offset? {
+    if (viewSize.width == 0 || viewSize.height == 0 || imageWidth <= 0 || imageHeight <= 0) return null
 
-        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val fileName = "mosaic_$timestamp.jpg"
-        val savedFile = File(mosaicDir, fileName)
+    // graphicsLayer scales around the center of the view, then translates.
+    // Reverse that: subtract center, subtract translation, divide by scale, add center back.
+    val cx = viewSize.width / 2f
+    val cy = viewSize.height / 2f
+    val localX = (position.x - cx - offset.x) / scale + cx
+    val localY = (position.y - cy - offset.y) / scale + cy
 
-        file.copyTo(savedFile, overwrite = true)
-        android.media.MediaScannerConnection.scanFile(
-            context,
-            arrayOf(savedFile.absolutePath),
-            arrayOf("image/jpeg"),
-            null
-        )
-        savedFile.absolutePath
-    } catch (_: Exception) {
-        null
-    }
+    // Now localX/localY is in the unscaled inner Box coordinate space.
+    // The image is Fit-scaled and centered within that Box.
+    val baseScale = min(viewSize.width / imageWidth.toFloat(), viewSize.height / imageHeight.toFloat())
+    val displayWidth = imageWidth * baseScale
+    val displayHeight = imageHeight * baseScale
+    val imgLeft = (viewSize.width - displayWidth) / 2f
+    val imgTop = (viewSize.height - displayHeight) / 2f
+
+    val x = (localX - imgLeft) / baseScale
+    val y = (localY - imgTop) / baseScale
+    if (x < 0f || y < 0f || x > imageWidth || y > imageHeight) return null
+    return Offset(x, y)
 }
 
-private fun shareMosaic(context: android.content.Context, file: File?) {
-    if (file == null || !file.exists()) return
-    val uri = FileProvider.getUriForFile(
-        context,
-        "${context.packageName}.fileprovider",
-        file
-    )
-    val intent = Intent(Intent.ACTION_SEND).apply {
-        type = "image/jpeg"
-        putExtra(Intent.EXTRA_STREAM, uri)
-        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-    }
-    context.startActivity(Intent.createChooser(intent, "Share Mosaic"))
+
+private fun getImageSize(path: String?): Pair<Int, Int>? {
+    if (path.isNullOrBlank()) return null
+    val options = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeFile(path, options)
+    if (options.outWidth <= 0 || options.outHeight <= 0) return null
+    return options.outWidth to options.outHeight
 }
 
-private fun prepareBlurredOverlay(
-    context: android.content.Context,
-    primaryPath: String,
-    blurRadius: Float
-): String? {
-    val radius = blurRadius.coerceIn(0f, 25f)
-    val cacheFile = File(
-        context.cacheDir,
-        "mosaic_overlay_${primaryPath.hashCode()}_${radius.roundToInt()}.jpg"
+private fun loadBitmapScaled(path: String, targetWidth: Int, targetHeight: Int): Bitmap? {
+    val bitmap = BitmapFactory.decodeFile(path) ?: return null
+    if (bitmap.width == targetWidth && bitmap.height == targetHeight) return bitmap
+    val scaled = Bitmap.createScaledBitmap(
+        bitmap,
+        targetWidth.coerceAtLeast(1),
+        targetHeight.coerceAtLeast(1),
+        true
     )
-    if (cacheFile.exists()) return cacheFile.absolutePath
-
-    val resized = loadScaledBitmap(primaryPath, 1024) ?: return null
-    val blurred = if (radius <= 0f) {
-        resized
-    } else {
-        blurBitmap(resized, radius)
-    }
-
-    cacheFile.outputStream().use { out ->
-        blurred.compress(Bitmap.CompressFormat.JPEG, 92, out)
-    }
-
-    if (blurred != resized) {
-        blurred.recycle()
-    }
-    resized.recycle()
-
-    return cacheFile.absolutePath
+    if (scaled != bitmap) bitmap.recycle()
+    return scaled
 }
 
 private fun loadScaledBitmap(path: String, maxSide: Int): Bitmap? {
@@ -873,8 +1397,38 @@ private fun loadScaledBitmap(path: String, maxSide: Int): Bitmap? {
     }
 }
 
+private fun prepareBlurredOverlay(
+    context: android.content.Context,
+    primaryPath: String,
+    blurRadius: Float
+): String? {
+    val radius = blurRadius.coerceIn(0f, 25f)
+    val cacheFile = File(
+        context.cacheDir,
+        "mosaic_overlay_${primaryPath.hashCode()}_${radius.roundToInt()}.jpg"
+    )
+    if (cacheFile.exists()) return cacheFile.absolutePath
+
+    val resized = loadScaledBitmap(primaryPath, 1024) ?: return null
+    val blurred = if (radius <= 0f) {
+        resized
+    } else {
+        blurBitmap(resized, radius)
+    }
+
+    cacheFile.outputStream().use { out ->
+        blurred.compress(Bitmap.CompressFormat.JPEG, 92, out)
+    }
+
+    if (blurred != resized) {
+        blurred.recycle()
+    }
+    resized.recycle()
+
+    return cacheFile.absolutePath
+}
+
 private fun blurBitmap(input: Bitmap, radius: Float): Bitmap {
-    // Simple stack blur (fast enough for 1024px overlays and avoids API-specific blur APIs).
     val bitmap = input.copy(Bitmap.Config.ARGB_8888, true)
     val w = bitmap.width
     val h = bitmap.height
@@ -979,122 +1533,49 @@ private fun blurBitmap(input: Bitmap, radius: Float): Bitmap {
     return bitmap
 }
 
-@Composable
-fun DebugReportDialog(
-    reportText: String,
-    onContinue: () -> Unit,
-    onCancel: () -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onCancel,
-        confirmButton = {
-            TextButton(onClick = onContinue) {
-                Text("Continue")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onCancel) {
-                Text("Cancel")
-            }
-        },
-        title = { Text("Debug Report") },
-        text = {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 360.dp)
-                    .verticalScroll(rememberScrollState())
-            ) {
-                Text(
-                    text = reportText,
-                    style = MaterialTheme.typography.bodySmall
-                )
-            }
+private fun viewModelSaveToGallery(context: android.content.Context, file: File): String? {
+    return try {
+        val picturesDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES)
+        val mosaicDir = File(picturesDir, "PhotoMosaics")
+        if (!mosaicDir.exists()) {
+            mosaicDir.mkdirs()
         }
-    )
+
+        val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
+        val fileName = "mosaic_$timestamp.jpg"
+        val savedFile = File(mosaicDir, fileName)
+
+        file.copyTo(savedFile, overwrite = true)
+        android.media.MediaScannerConnection.scanFile(
+            context,
+            arrayOf(savedFile.absolutePath),
+            arrayOf("image/jpeg"),
+            null
+        )
+        savedFile.absolutePath
+    } catch (_: Exception) {
+        null
+    }
 }
 
-@Composable
-fun AdvancedSettingsDialog(
-    settings: com.storrs.photomosaiccreatorandroid.ui.viewmodel.MosaicSettingsState,
-    onDismiss: () -> Unit,
-    onUpdateColorChange: (Int) -> Unit,
-    onUpdatePattern: (com.storrs.photomosaiccreatorandroid.models.PatternKind) -> Unit,
-    onUpdateUseAllImages: (Boolean) -> Unit,
-    onUpdateMirrorImages: (Boolean) -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        confirmButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Close")
-            }
-        },
-        title = { Text("Advanced Settings") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text(
-                    text = "Color Change: ${settings.colorChangePercent}%",
-                    style = MaterialTheme.typography.bodyMedium
-                )
-                Slider(
-                    value = settings.colorChangePercent.toFloat(),
-                    onValueChange = { value -> onUpdateColorChange(value.roundToInt()) },
-                    valueRange = 0f..100f
-                )
-
-                SettingsDropdown(
-                    label = "Pattern",
-                    selectedLabel = settings.pattern.name,
-                    options = listOf("Square", "Parquet"),
-                    onSelected = { index ->
-                        val pattern = if (index == 1)
-                            com.storrs.photomosaiccreatorandroid.models.PatternKind.Parquet
-                        else
-                            com.storrs.photomosaiccreatorandroid.models.PatternKind.Square
-                        onUpdatePattern(pattern)
-                    }
-                )
-
-                if (settings.pattern == com.storrs.photomosaiccreatorandroid.models.PatternKind.Parquet) {
-                    Text(
-                        text = "Parquet ratio (L:P): ${settings.parquetRatio}",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    Text(
-                        text = "Landscape: ${settings.landscapeCount} | Portrait: ${settings.portraitCount}",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                }
-
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Checkbox(
-                        checked = settings.useAllImages,
-                        onCheckedChange = onUpdateUseAllImages
-                    )
-                    Text("Use All Images")
-                }
-
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Checkbox(
-                        checked = settings.mirrorImages,
-                        onCheckedChange = onUpdateMirrorImages
-                    )
-                    Text("Mirror Images")
-                }
-            }
-        }
+private fun shareMosaic(context: android.content.Context, file: File?) {
+    if (file == null || !file.exists()) return
+    val uri = FileProvider.getUriForFile(
+        context,
+        "${context.packageName}.fileprovider",
+        file
     )
+    val intent = Intent(Intent.ACTION_SEND).apply {
+        type = "image/jpeg"
+        putExtra(Intent.EXTRA_STREAM, uri)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    }
+    context.startActivity(Intent.createChooser(intent, "Share Mosaic"))
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsDropdown(
+private fun SettingsDropdown(
     label: String,
     selectedLabel: String,
     options: List<String>,
@@ -1107,282 +1588,264 @@ fun SettingsDropdown(
     val content = if (highlight) MaterialTheme.colorScheme.onPrimaryContainer
     else MaterialTheme.colorScheme.onSurfaceVariant
 
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelLarge,
-            fontWeight = FontWeight.SemiBold
-        )
-        OutlinedButton(
-            onClick = { expanded = true },
-            colors = ButtonDefaults.outlinedButtonColors(
-                containerColor = container,
-                contentColor = content
-            ),
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(60.dp)
-        ) {
-            Text(selectedLabel, style = MaterialTheme.typography.titleMedium)
-        }
-        DropdownMenu(
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Text(text = label, style = MaterialTheme.typography.bodyMedium)
+        ExposedDropdownMenuBox(
             expanded = expanded,
-            onDismissRequest = { expanded = false }
+            onExpandedChange = { expanded = !expanded }
         ) {
-            options.forEachIndexed { index, option ->
-                DropdownMenuItem(
-                    text = { Text(option) },
-                    onClick = {
-                        expanded = false
-                        onSelected(index)
-                    }
+            OutlinedTextField(
+                value = selectedLabel,
+                onValueChange = {},
+                readOnly = true,
+                modifier = Modifier
+                    .menuAnchor()
+                    .fillMaxWidth()
+                    .height(56.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedContainerColor = container,
+                    unfocusedContainerColor = container,
+                    focusedTextColor = content,
+                    unfocusedTextColor = content
                 )
+            )
+            ExposedDropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false }
+            ) {
+                options.forEachIndexed { index, option ->
+                    DropdownMenuItem(
+                        text = { Text(option) },
+                        onClick = {
+                            onSelected(index)
+                            expanded = false
+                        }
+                    )
+                }
             }
         }
     }
 }
 
 private fun formatPrintSize(option: com.storrs.photomosaiccreatorandroid.ui.viewmodel.PrintSizeOption): String {
-    val width = formatInches(option.widthInches)
-    val height = formatInches(option.heightInches)
-    return "${option.label} (${width}\" x ${height}\")"
+    return "${option.label} (${option.widthInches}\" x ${option.heightInches}\")"
 }
 
-private fun formatInches(value: Double): String {
-    val rounded = (value * 100).roundToInt() / 100.0
-    return if (rounded % 1.0 == 0.0) {
-        rounded.toInt().toString()
-    } else {
-        rounded.toString()
-    }
-}
+@Composable
+private fun AdvancedSettingsDialog(
+    settings: com.storrs.photomosaiccreatorandroid.ui.viewmodel.MosaicSettingsState,
+    onDismiss: () -> Unit,
+    onUpdateColorChange: (Int) -> Unit,
+    onUpdatePattern: (com.storrs.photomosaiccreatorandroid.models.PatternKind) -> Unit,
+    onUpdateUseAllImages: (Boolean) -> Unit,
+    onUpdateMirrorImages: (Boolean) -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Advanced Settings") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Color Change: ${settings.colorChangePercent}%", style = MaterialTheme.typography.bodySmall)
+                Slider(
+                    value = settings.colorChangePercent.toFloat(),
+                    onValueChange = { onUpdateColorChange(it.roundToInt()) },
+                    valueRange = 0f..100f
+                )
 
-/**
- * Resolves a content URI to a stable file path.
- *
- * First attempts to read the real file path from MediaStore.
- * If the real path exists on disk it is returned directly.
- * Otherwise the image bytes are copied into the app's private
- * "cell_images" directory so the path survives across app restarts.
- */
-fun getRealPathFromURI(context: android.content.Context, uri: Uri): String? {
-    // 1. Try MediaStore real-path (fastest – no copy needed)
-    if (uri.scheme == "content") {
-        try {
-            val cursor = context.contentResolver.query(
-                uri,
-                arrayOf(MediaStore.Images.Media.DATA),
-                null, null, null
-            )
-            cursor?.use {
-                if (it.moveToFirst()) {
-                    val index = it.getColumnIndexOrThrow(MediaStore.Images.Media.DATA)
-                    val realPath = it.getString(index)
-                    if (realPath != null && File(realPath).exists()) {
-                        return realPath
+                val patternOptions = com.storrs.photomosaiccreatorandroid.models.PatternKind.values().toList()
+                val selectedPattern = settings.pattern
+                SettingsDropdown(
+                    label = "Pattern",
+                    selectedLabel = selectedPattern.name,
+                    options = patternOptions.map { it.name },
+                    onSelected = { index ->
+                        patternOptions.getOrNull(index)?.let { onUpdatePattern(it) }
                     }
+                )
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(
+                        checked = settings.useAllImages,
+                        onCheckedChange = { onUpdateUseAllImages(it) }
+                    )
+                    Text("Use All Images", style = MaterialTheme.typography.bodyMedium)
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(
+                        checked = settings.mirrorImages,
+                        onCheckedChange = { onUpdateMirrorImages(it) }
+                    )
+                    Text("Mirror Images", style = MaterialTheme.typography.bodyMedium)
                 }
             }
-        } catch (_: Exception) { /* fall through */ }
-    }
-
-    if (uri.scheme == "file") {
-        val filePath = uri.path
-        if (filePath != null && File(filePath).exists()) return filePath
-    }
-
-    // 2. Fallback – copy the stream into app-private storage
-    return try {
-        val dir = File(context.filesDir, "cell_images")
-        if (!dir.exists()) dir.mkdirs()
-
-        val fileName = "img_${uri.hashCode().toUInt()}.jpg"
-        val dest = File(dir, fileName)
-        if (dest.exists()) return dest.absolutePath  // already copied
-
-        context.contentResolver.openInputStream(uri)?.use { input ->
-            dest.outputStream().use { output ->
-                input.copyTo(output)
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Done")
             }
         }
-        if (dest.exists() && dest.length() > 0) dest.absolutePath else null
-    } catch (e: Exception) {
-        Log.e("MainActivity", "Error copying URI to app storage", e)
-        null
-    }
+    )
 }
 
 @Composable
-fun GenerationErrorUI(message: String, viewModel: MosaicViewModel) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.errorContainer
-        )
-    ) {
-        Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            Text(
-                text = "✗ Error",
-                style = MaterialTheme.typography.titleMedium
-            )
-
-            Text(
-                text = message,
-                style = MaterialTheme.typography.bodySmall
-            )
-
-            Button(
-                onClick = { viewModel.reset() },
-                modifier = Modifier.fillMaxWidth()
+private fun DebugReportDialog(
+    reportText: String,
+    onContinue: () -> Unit,
+    onCancel: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text("Debug Report") },
+        text = {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 120.dp, max = 360.dp)
+                    .verticalScroll(rememberScrollState())
             ) {
-                Text("Try Again")
+                Text(reportText, style = MaterialTheme.typography.bodySmall)
             }
+        },
+        confirmButton = {
+            TextButton(onClick = onContinue) { Text("Continue") }
+        },
+        dismissButton = {
+            TextButton(onClick = onCancel) { Text("Cancel") }
         }
-    }
+    )
 }
 
 @Composable
-fun CellPhotoGridScreen(
+private fun CellPhotoGridScreen(
     cellPhotoPaths: List<String>,
     onClose: () -> Unit,
     onAddMore: () -> Unit,
     onClearAll: () -> Unit,
     onDeleteSelected: (List<String>) -> Unit
 ) {
-    BackHandler(onBack = onClose)
-    val selectedPaths = remember { mutableStateListOf<String>() }
+    var selected by remember { mutableStateOf(setOf<String>()) }
 
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .statusBarsPadding()
-            .padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp)
+            .background(MaterialTheme.colorScheme.background)
+            .padding(12.dp)
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp)
+            verticalAlignment = Alignment.CenterVertically
         ) {
             Text(
                 text = "Cell Photos",
                 style = MaterialTheme.typography.titleLarge,
                 modifier = Modifier.weight(1f)
             )
-            TextButton(onClick = onClose) {
-                Text("Back")
-            }
+            TextButton(onClick = onClose) { Text("Back") }
         }
 
-        Box(modifier = Modifier.fillMaxSize()) {
-            if (cellPhotoPaths.isEmpty()) {
-                Text(
-                    text = "No photos selected",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.align(Alignment.Center)
-                )
-            } else {
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(4),
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(
-                        bottom = 120.dp
-                    )
-                ) {
-                    items(cellPhotoPaths, key = { it }) { path ->
-                        val isSelected = selectedPaths.contains(path)
-                        Box(
-                            modifier = Modifier
-                                .padding(4.dp)
-                                .aspectRatio(1f)
-                                .clip(MaterialTheme.shapes.small)
-                                .border(
-                                    width = 2.dp,
-                                    color = if (isSelected)
-                                        MaterialTheme.colorScheme.primary
-                                    else
-                                        Color.Transparent,
-                                    shape = MaterialTheme.shapes.small
-                                )
-                                .clickable {
-                                    if (isSelected) {
-                                        selectedPaths.remove(path)
-                                    } else {
-                                        selectedPaths.add(path)
-                                    }
-                                }
-                        ) {
-                            AsyncImage(
-                                model = File(path),
-                                contentDescription = "Cell photo",
-                                modifier = Modifier.fillMaxSize(),
-                                contentScale = ContentScale.Crop
-                            )
-                        }
-                    }
-                }
-            }
-
-            Surface(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .fillMaxWidth()
-                    .navigationBarsPadding(),
-                tonalElevation = 6.dp,
-                color = MaterialTheme.colorScheme.surfaceVariant
-            ) {
-                Column(
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(4),
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(6.dp),
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            items(cellPhotoPaths) { path ->
+                val isSelected = selected.contains(path)
+                Box(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(
-                            text = "${selectedPaths.size} selected",
-                            style = MaterialTheme.typography.bodyMedium,
-                            modifier = Modifier.weight(1f)
+                        .aspectRatio(1f)
+                        .clip(MaterialTheme.shapes.small)
+                        .border(
+                            width = if (isSelected) 2.dp else 1.dp,
+                            color = if (isSelected) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.outline,
+                            shape = MaterialTheme.shapes.small
                         )
-                        Button(
-                            onClick = {
-                                onDeleteSelected(selectedPaths.toList())
-                                selectedPaths.clear()
-                            },
-                            enabled = selectedPaths.isNotEmpty()
-                        ) {
-                            Text("Delete")
+                        .clickable {
+                            selected = if (isSelected) {
+                                selected - path
+                            } else {
+                                selected + path
+                            }
                         }
-                    }
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        OutlinedButton(
-                            onClick = onClearAll,
-                            modifier = Modifier.weight(1f),
-                            enabled = cellPhotoPaths.isNotEmpty()
-                        ) {
-                            Text("Clear All")
-                        }
-                        Button(
-                            onClick = onAddMore,
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("Add More")
-                        }
-                    }
+                ) {
+                    AsyncImage(
+                        model = File(path),
+                        contentDescription = "Cell photo",
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Crop
+                    )
                 }
             }
         }
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(MaterialTheme.colorScheme.surface)
+                .padding(vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            OutlinedButton(
+                onClick = onAddMore,
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("Add More")
+            }
+            OutlinedButton(
+                onClick = onClearAll,
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("Clear All")
+            }
+            Button(
+                onClick = {
+                    onDeleteSelected(selected.toList())
+                    selected = emptySet()
+                },
+                enabled = selected.isNotEmpty(),
+                modifier = Modifier.weight(1f)
+            ) {
+                Text("Delete Selected")
+            }
+        }
+    }
+}
+
+private fun getRealPathFromURI(context: Context, uri: Uri): String? {
+    if (uri.scheme == "file") {
+        return uri.path
+    }
+
+    val displayName = queryDisplayName(context, uri) ?: "image_${System.currentTimeMillis()}.jpg"
+    val cacheFile = File(context.cacheDir, displayName)
+
+    return try {
+        context.contentResolver.openInputStream(uri)?.use { input ->
+            cacheFile.outputStream().use { output ->
+                input.copyTo(output)
+            }
+        }
+        cacheFile.absolutePath
+    } catch (_: Exception) {
+        null
+    }
+}
+
+private fun queryDisplayName(context: Context, uri: Uri): String? {
+    var cursor: Cursor? = null
+    return try {
+        cursor = context.contentResolver.query(uri, null, null, null, null)
+        if (cursor != null && cursor.moveToFirst()) {
+            val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (index >= 0) cursor.getString(index) else null
+        } else {
+            null
+        }
+    } finally {
+        cursor?.close()
     }
 }
