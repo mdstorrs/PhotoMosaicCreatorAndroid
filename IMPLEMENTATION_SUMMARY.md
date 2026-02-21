@@ -1,4 +1,4 @@
-# Photo Mosaic Creator Android - Implementation Summary
+# MosaicMatrix - Implementation Summary
 
 ## Overview
 A complete, efficient Kotlin implementation for generating photo mosaics on Android devices, converted from C# to idiomatic Kotlin with optimization for mobile constraints.
@@ -6,7 +6,7 @@ A complete, efficient Kotlin implementation for generating photo mosaics on Andr
 ## Key Design Decisions for Efficiency
 
 ### 1. **Memory-Efficient Bitmap Format**
-- All cell images use `RGB_565` (16-bit) instead of `ARGB_8888` (32-bit)
+- All cell images use `RGB_565` (16-bit) instead of `ARG_8888` (32-bit)
 - Reduces memory usage by 50% per image
 - Critical for handling hundreds of images on Android devices
 
@@ -164,7 +164,7 @@ val service = CoreMosaicGenerationService()
 
 val project = PhotoMosaicProject(
     primaryImagePath = "/path/to/primary.jpg",
-    cellPhotos = listOf(...),
+    cellPhotos = listOf(/* ... */),
     selectedPrintSize = PrintSize("8x10", 8.0, 10.0),
     selectedResolution = Resolution("300 DPI", 300),
     selectedCellSize = CellSize("0.5 inch", 12.7)
@@ -213,4 +213,3 @@ viewModelScope.launch {
 - **Standard Library**: Collection extensions, regex for pattern parsing
 
 No external image libraries required - uses native Android APIs for optimal performance.
-

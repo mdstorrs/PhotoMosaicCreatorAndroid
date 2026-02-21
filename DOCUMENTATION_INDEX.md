@@ -1,4 +1,4 @@
-# Photo Mosaic Creator Android - Documentation Index
+# MosaicMatrix - Documentation Index
 
 ## 📚 Documentation Overview
 
@@ -357,4 +357,3 @@ Everything is documented and ready to go. The service layer is production-ready.
 For questions, refer to the appropriate documentation above. For code details, review the source files (.kt).
 
 **Happy coding!** 🎉
-

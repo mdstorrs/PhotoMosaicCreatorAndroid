@@ -218,7 +218,7 @@ fun MosaicGeneratorScreen(viewModel: MosaicViewModel) {
                 ) {
                     when (currentStep) {
                         WizardStep.Start -> {
-                            StepHeader(title = "Photo Mosaic Creator", showBack = false)
+                            StepHeader(title = "MosaicMatrix", showBack = false)
                             Spacer(modifier = Modifier.height(12.dp))
                             LargePrimaryButton(
                                 text = "Create Mosaic",
