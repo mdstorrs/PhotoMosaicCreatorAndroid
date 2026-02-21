@@ -86,6 +86,17 @@ import com.storrs.photomosaiccreatorandroid.preview.createEmptyMask
 import com.storrs.photomosaiccreatorandroid.preview.createSolidMask
 import com.storrs.photomosaiccreatorandroid.preview.generateFaceMaskBitmap
 import com.storrs.photomosaiccreatorandroid.preview.paintSoftBrushOnMask
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.BorderStroke
+
+// ── Color Palette ──
+private val SoftParchment = Color(0xFFF9F7F2)
+private val GoldenLab = Color(0xFFF4D35E)
+private val DeepNavy = Color(0xFF1F2D3D)
+private val SlateBlue = Color(0xFF5A7D9A)
+private val WarmGrey = Color(0xFFA8A196)
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -119,9 +130,11 @@ fun MosaicGeneratorScreen(viewModel: MosaicViewModel) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
-    val backgroundColor = Color(0xFFF7F5F0)
-    val primaryAccent = Color(0xFF7FB7E6)
-    val secondaryAccent = Color(0xFFFFD166)
+    val backgroundColor = Color(0xFFF9F7F2)
+    val primaryAccent = Color(0xFFF4D35E)
+    val secondaryAccent = Color(0xFF5A7D9A)
+    val deepNavy = Color(0xFF1F2D3D)
+    val warmGrey = Color(0xFFA8A196)
 
     var currentStep by rememberSaveable { mutableStateOf(WizardStep.Start) }
     var showCellPhotoGrid by rememberSaveable { mutableStateOf(false) }
@@ -211,110 +224,133 @@ fun MosaicGeneratorScreen(viewModel: MosaicViewModel) {
                 Column(
                     modifier = Modifier
                         .fillMaxSize()
-                        .statusBarsPadding()
                         .verticalScroll(rememberScrollState())
-                        .padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
                     when (currentStep) {
                         WizardStep.Start -> {
-                            StepHeader(title = "MosaicMatrix", showBack = false)
-                            Spacer(modifier = Modifier.height(12.dp))
-                            LargePrimaryButton(
-                                text = "Create Mosaic",
-                                onClick = { currentStep = WizardStep.MainPhoto },
-                                color = primaryAccent
-                            )
+                            TitleBar(title = "MosaicMatrix", onBack = null, barColor = deepNavy)
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(16.dp),
+                                verticalArrangement = Arrangement.spacedBy(16.dp)
+                            ) {
+                                Spacer(modifier = Modifier.height(12.dp))
+                                LargePrimaryButton(
+                                    text = "Create Mosaic",
+                                    onClick = { currentStep = WizardStep.MainPhoto },
+                                    color = primaryAccent
+                                )
+                            }
                         }
                         WizardStep.MainPhoto -> {
-                            StepHeader(title = "Main Photo", onBack = goBack)
-                            if (primaryImagePath != null) {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .aspectRatio(1f)
-                                        .clip(MaterialTheme.shapes.medium)
-                                        .background(MaterialTheme.colorScheme.surface)
-                                ) {
-                                    AsyncImage(
-                                        model = File(primaryImagePath!!),
-                                        contentDescription = "Primary image preview",
-                                        modifier = Modifier.fillMaxSize(),
-                                        contentScale = ContentScale.Fit
-                                    )
+                            TitleBar(title = "Main Photo", onBack = goBack, barColor = deepNavy)
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(16.dp),
+                                verticalArrangement = Arrangement.spacedBy(16.dp)
+                            ) {
+                                if (primaryImagePath != null) {
+                                    Box(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .aspectRatio(1f)
+                                            .clip(RoundedCornerShape(14.dp))
+                                            .background(backgroundColor)
+                                    ) {
+                                        AsyncImage(
+                                            model = File(primaryImagePath!!),
+                                            contentDescription = "Primary image preview",
+                                            modifier = Modifier.fillMaxSize(),
+                                            contentScale = ContentScale.Fit
+                                        )
+                                    }
                                 }
+                                LargePrimaryButton(
+                                    text = if (primaryImagePath == null) "Add Main Photo" else "Change Main Photo",
+                                    onClick = { primaryImageLauncher.launch("image/*") },
+                                    color = primaryAccent
+                                )
+                                LargeSecondaryButton(
+                                    text = "Continue",
+                                    onClick = { currentStep = WizardStep.CellPhotos },
+                                    enabled = primaryImagePath != null,
+                                    color = secondaryAccent
+                                )
                             }
-                            LargePrimaryButton(
-                                text = if (primaryImagePath == null) "Add Main Photo" else "Change Main Photo",
-                                onClick = { primaryImageLauncher.launch("image/*") },
-                                color = primaryAccent
-                            )
-                            LargeSecondaryButton(
-                                text = "Continue",
-                                onClick = { currentStep = WizardStep.CellPhotos },
-                                enabled = primaryImagePath != null
-                            )
                         }
                         WizardStep.CellPhotos -> {
-                            StepHeader(title = "Small Photos", onBack = goBack)
-                            LargePrimaryButton(
-                                text = if (cellPhotoPaths.isEmpty()) "Add small photos" else "Add More Photos",
-                                onClick = { multipleImagesLauncher.launch("image/*") },
-                                color = primaryAccent
-                            )
-                            LargeSecondaryButton(
-                                text = "${cellPhotoPaths.size} photos selected",
-                                onClick = { showCellPhotoGrid = true },
-                                enabled = cellPhotoPaths.isNotEmpty(),
-                                highlight = true
-                            )
-                            LargeSecondaryButton(
-                                text = "Continue",
-                                onClick = { currentStep = WizardStep.Options },
-                                enabled = cellPhotoPaths.isNotEmpty()
-                            )
+                            TitleBar(title = "Small Photos", onBack = goBack, barColor = deepNavy)
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(16.dp),
+                                verticalArrangement = Arrangement.spacedBy(16.dp)
+                            ) {
+                                LargePrimaryButton(
+                                    text = if (cellPhotoPaths.isEmpty()) "Add small photos" else "Add More Photos",
+                                    onClick = { multipleImagesLauncher.launch("image/*") },
+                                    color = primaryAccent
+                                )
+                                LargeSecondaryButton(
+                                    text = "${cellPhotoPaths.size} photos selected",
+                                    onClick = { showCellPhotoGrid = true },
+                                    enabled = cellPhotoPaths.isNotEmpty(),
+                                    highlight = true,
+                                    color = secondaryAccent
+                                )
+                                LargeSecondaryButton(
+                                    text = "Continue",
+                                    onClick = { currentStep = WizardStep.Options },
+                                    enabled = cellPhotoPaths.isNotEmpty(),
+                                    color = secondaryAccent
+                                )
+                            }
                         }
                         WizardStep.Options -> {
-                            StepHeader(title = "Select Options", onBack = goBack)
-                            SettingsDropdown(
-                                label = "Print Size",
-                                selectedLabel = formatPrintSize(settings.selectedPrintSize),
-                                options = settings.printSizes.map { formatPrintSize(it) },
-                                onSelected = { index ->
-                                    settings.printSizes.getOrNull(index)
-                                        ?.let { viewModel.updatePrintSize(it) }
-                                },
-                                highlight = true
-                            )
-                            SettingsDropdown(
-                                label = "Cell Photo Size",
-                                selectedLabel = settings.selectedCellSize.label,
-                                options = settings.cellSizes.map { it.label },
-                                onSelected = { index ->
-                                    settings.cellSizes.getOrNull(index)
-                                        ?.let { viewModel.updateCellSize(it) }
-                                },
-                                highlight = true
-                            )
-                            SubtleButton(
-                                text = "Advanced",
-                                onClick = { showAdvancedSettings = true }
-                            )
-                            LargePrimaryButton(
-                                text = "Go!",
-                                onClick = {
-                                    //if (BuildConfig.DEBUG) {
-                                    //    debugReportText = viewModel.buildDebugReport(primaryImagePath, cellPhotoPaths)
-                                    //    showDebugReport = true
-                                    //} else {
-                                    viewModel.generateMosaicWithDefaults()
-                                    //}
-                                },
-                                color = secondaryAccent,
-                                enabled = primaryImagePath != null && cellPhotoPaths.isNotEmpty()
-                            )
-                            if (generationState is GenerationState.Loading) {
-                                GenerationProgressUI(progress, viewModel)
+                            TitleBar(title = "Select Options", onBack = goBack, barColor = deepNavy)
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(16.dp),
+                                verticalArrangement = Arrangement.spacedBy(16.dp)
+                            ) {
+                                SettingsDropdown(
+                                    label = "Print Size",
+                                    selectedLabel = formatPrintSize(settings.selectedPrintSize),
+                                    options = settings.printSizes.map { formatPrintSize(it) },
+                                    onSelected = { index ->
+                                        settings.printSizes.getOrNull(index)
+                                            ?.let { viewModel.updatePrintSize(it) }
+                                    },
+                                    highlight = true
+                                )
+                                SettingsDropdown(
+                                    label = "Cell Photo Size",
+                                    selectedLabel = settings.selectedCellSize.label,
+                                    options = settings.cellSizes.map { it.label },
+                                    onSelected = { index ->
+                                        settings.cellSizes.getOrNull(index)
+                                            ?.let { viewModel.updateCellSize(it) }
+                                    },
+                                    highlight = true
+                                )
+                                SubtleButton(
+                                    text = "Advanced",
+                                    onClick = { showAdvancedSettings = true }
+                                )
+                                LargePrimaryButton(
+                                    text = "Go!",
+                                    onClick = {
+                                        viewModel.generateMosaicWithDefaults()
+                                    },
+                                    color = primaryAccent,
+                                    enabled = primaryImagePath != null && cellPhotoPaths.isNotEmpty()
+                                )
+                                if (generationState is GenerationState.Loading) {
+                                    GenerationProgressUI(progress, viewModel)
+                                }
                             }
                         }
                         WizardStep.Preview -> Unit
@@ -348,22 +384,48 @@ fun MosaicGeneratorScreen(viewModel: MosaicViewModel) {
 }
 
 @Composable
-private fun StepHeader(title: String, onBack: (() -> Unit)? = null, showBack: Boolean = true) {
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        Text(
-            text = title,
-            style = MaterialTheme.typography.headlineSmall,
-            modifier = Modifier.weight(1f)
-        )
-        if (showBack && onBack != null) {
-            TextButton(onClick = onBack) {
-                Text("Back")
+private fun TitleBar(title: String, onBack: (() -> Unit)?, barColor: Color) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .background(barColor)
+                .statusBarsPadding()
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(56.dp)
+                    .padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (onBack != null) {
+                    IconButton(onClick = onBack) {
+                        Icon(
+                            imageVector = Icons.Filled.ArrowBack,
+                            contentDescription = "Back",
+                            tint = Color.White
+                        )
+                    }
+                } else {
+                    Spacer(modifier = Modifier.width(48.dp))
+                }
+                Spacer(modifier = Modifier.weight(1f))
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium,
+                    color = Color.White
+                )
+                Spacer(modifier = Modifier.weight(1f))
+                Spacer(modifier = Modifier.width(48.dp))
             }
         }
     }
+}
+
+@Composable
+private fun StepHeader(title: String, onBack: (() -> Unit)? = null, showBack: Boolean = true) {
+    TitleBar(title = title, onBack = if (showBack) onBack else null, barColor = Color(0xFF1F2D3D))
 }
 
 @Composable
@@ -373,15 +435,24 @@ private fun LargePrimaryButton(
     color: Color,
     enabled: Boolean = true
 ) {
-    Button(
-        onClick = onClick,
-        enabled = enabled,
-        colors = ButtonDefaults.buttonColors(containerColor = color),
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(64.dp)
+    Box(
+        modifier = Modifier.fillMaxWidth(),
+        contentAlignment = Alignment.Center
     ) {
-        Text(text, style = MaterialTheme.typography.titleMedium)
+        Button(
+            onClick = onClick,
+            enabled = enabled,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = color,
+                contentColor = DeepNavy
+            ),
+            shape = RoundedCornerShape(50),
+            modifier = Modifier
+                .fillMaxWidth(0.6f)
+                .height(64.dp)
+        ) {
+            Text(text, style = MaterialTheme.typography.titleMedium)
+        }
     }
 }
 
@@ -390,25 +461,27 @@ private fun LargeSecondaryButton(
     text: String,
     onClick: () -> Unit,
     enabled: Boolean = true,
-    highlight: Boolean = false
+    highlight: Boolean = false,
+    color: Color = Color(0xFF5A7D9A)
 ) {
-    val container = if (highlight) MaterialTheme.colorScheme.primaryContainer
-    else MaterialTheme.colorScheme.surfaceVariant
-    val content = if (highlight) MaterialTheme.colorScheme.onPrimaryContainer
-    else MaterialTheme.colorScheme.onSurfaceVariant
-
-    OutlinedButton(
-        onClick = onClick,
-        enabled = enabled,
-        colors = ButtonDefaults.outlinedButtonColors(
-            containerColor = container,
-            contentColor = content
-        ),
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(60.dp)
+    Box(
+        modifier = Modifier.fillMaxWidth(),
+        contentAlignment = Alignment.Center
     ) {
-        Text(text, style = MaterialTheme.typography.titleMedium)
+        OutlinedButton(
+            onClick = onClick,
+            enabled = enabled,
+            colors = ButtonDefaults.outlinedButtonColors(
+                containerColor = color,
+                contentColor = Color.White
+            ),
+            shape = RoundedCornerShape(50),
+            modifier = Modifier
+                .fillMaxWidth(0.6f)
+                .height(60.dp)
+        ) {
+            Text(text, style = MaterialTheme.typography.titleMedium)
+        }
     }
 }
 
@@ -418,18 +491,25 @@ private fun SubtleButton(
     onClick: () -> Unit,
     enabled: Boolean = true
 ) {
-    OutlinedButton(
-        onClick = onClick,
-        enabled = enabled,
-        colors = ButtonDefaults.outlinedButtonColors(
-            containerColor = Color.White,
-            contentColor = MaterialTheme.colorScheme.onSurface
-        ),
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(44.dp)
+    Box(
+        modifier = Modifier.fillMaxWidth(),
+        contentAlignment = Alignment.Center
     ) {
-        Text(text, style = MaterialTheme.typography.bodyMedium)
+        OutlinedButton(
+            onClick = onClick,
+            enabled = enabled,
+            colors = ButtonDefaults.outlinedButtonColors(
+                containerColor = Color.White,
+                contentColor = DeepNavy
+            ),
+            border = BorderStroke(1.dp, WarmGrey),
+            shape = RoundedCornerShape(50),
+            modifier = Modifier
+                .fillMaxWidth(0.6f)
+                .height(44.dp)
+        ) {
+            Text(text, style = MaterialTheme.typography.bodyMedium)
+        }
     }
 }
 
@@ -705,27 +785,10 @@ fun MosaicPreviewScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .statusBarsPadding()
             .navigationBarsPadding()
-            .background(Color(0xFFF7F5F0))
+            .background(Color(0xFFF9F7F2))
     ) {
-        // ── Header row ──
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 4.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            TextButton(onClick = onClose) { Text("← Back") }
-            Spacer(modifier = Modifier.weight(1f))
-            Text(
-                text = "Preview",
-                style = MaterialTheme.typography.titleMedium
-            )
-            Spacer(modifier = Modifier.weight(1f))
-            // invisible spacer to balance the Back button
-            Spacer(modifier = Modifier.width(64.dp))
-        }
+        TitleBar(title = "Preview", onBack = onClose, barColor = Color(0xFF1F2D3D))
 
         // ── Mosaic canvas (takes remaining space between header and controls) ──
         MosaicZoomableCanvas(
@@ -758,14 +821,15 @@ fun MosaicPreviewScreen(
         ) {
             tabLabels.forEachIndexed { index, label ->
                 val isActive = activeTab == index
-                val bgColor = if (isActive) Color(0xFF7FB7E6) else Color(0xFFE0E0E0)
-                val txtColor = if (isActive) Color.White else Color(0xFF555555)
+                val bgColor = if (isActive) SlateBlue else WarmGrey.copy(alpha = 0.35f)
+                val txtColor = if (isActive) Color.White else DeepNavy
                 Button(
                     onClick = { activeTab = index },
                     colors = ButtonDefaults.buttonColors(
                         containerColor = bgColor,
                         contentColor = txtColor
                     ),
+                    shape = RoundedCornerShape(50),
                     modifier = Modifier
                         .weight(1f)
                         .height(40.dp),
@@ -994,7 +1058,8 @@ fun MosaicPreviewScreen(
                     .weight(1f)
                     .height(50.dp),
                 enabled = mosaicFile != null && !isSaving,
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7FB7E6))
+                shape = RoundedCornerShape(50),
+                colors = ButtonDefaults.buttonColors(containerColor = SlateBlue)
             ) {
                 Text(if (isSaving) "Saving..." else "Save", style = MaterialTheme.typography.titleSmall)
             }
@@ -1020,7 +1085,8 @@ fun MosaicPreviewScreen(
                     .weight(1f)
                     .height(50.dp),
                 enabled = mosaicFile != null,
-                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF7FB7E6))
+                shape = RoundedCornerShape(50),
+                colors = ButtonDefaults.buttonColors(containerColor = SlateBlue)
             ) {
                 Text("Share", style = MaterialTheme.typography.titleSmall)
             }
@@ -1028,7 +1094,9 @@ fun MosaicPreviewScreen(
                 onClick = onStartAgain,
                 modifier = Modifier
                     .weight(1f)
-                    .height(50.dp)
+                    .height(50.dp),
+                shape = RoundedCornerShape(50),
+                border = BorderStroke(1.dp, WarmGrey)
             ) {
                 Text("Start Again", style = MaterialTheme.typography.titleSmall)
             }
@@ -1184,8 +1252,8 @@ private fun MosaicZoomableCanvas(
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .clip(MaterialTheme.shapes.small)
-            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .clip(RoundedCornerShape(12.dp))
+            .background(SoftParchment)
             .onSizeChanged {
                 viewSize = it
                 offset = clampOffset(viewSize, mosaicWidth, mosaicHeight, scale, offset)
@@ -1616,13 +1684,11 @@ private fun SettingsDropdown(
     highlight: Boolean = false
 ) {
     var expanded by remember { mutableStateOf(false) }
-    val container = if (highlight) MaterialTheme.colorScheme.primaryContainer
-    else MaterialTheme.colorScheme.surfaceVariant
-    val content = if (highlight) MaterialTheme.colorScheme.onPrimaryContainer
-    else MaterialTheme.colorScheme.onSurfaceVariant
+    val container = if (highlight) GoldenLab else SoftParchment
+    val content = DeepNavy
 
     Column(modifier = Modifier.fillMaxWidth()) {
-        Text(text = label, style = MaterialTheme.typography.bodyMedium)
+        Text(text = label, style = MaterialTheme.typography.bodyMedium, color = DeepNavy)
         ExposedDropdownMenuBox(
             expanded = expanded,
             onExpandedChange = { expanded = !expanded }
@@ -1639,7 +1705,9 @@ private fun SettingsDropdown(
                     focusedContainerColor = container,
                     unfocusedContainerColor = container,
                     focusedTextColor = content,
-                    unfocusedTextColor = content
+                    unfocusedTextColor = content,
+                    focusedBorderColor = WarmGrey,
+                    unfocusedBorderColor = WarmGrey
                 )
             )
             ExposedDropdownMenu(
@@ -1762,88 +1830,87 @@ private fun CellPhotoGridScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .statusBarsPadding()
-            .padding(12.dp)
+            .background(Color(0xFFF9F7F2))
     ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Text(
-                text = "Cell Photos",
-                style = MaterialTheme.typography.titleLarge,
-                modifier = Modifier.weight(1f)
-            )
-            TextButton(onClick = onClose) { Text("Back") }
-        }
-
-        LazyVerticalGrid(
-            columns = GridCells.Fixed(4),
+        TitleBar(title = "Cell Photos", onBack = onClose, barColor = Color(0xFF1F2D3D))
+        Column(
             modifier = Modifier
-                .weight(1f)
-                .fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                .fillMaxSize()
+                .padding(12.dp)
         ) {
-            items(cellPhotoPaths) { path ->
-                val isSelected = selected.contains(path)
-                Box(
-                    modifier = Modifier
-                        .aspectRatio(1f)
-                        .clip(MaterialTheme.shapes.small)
-                        .border(
-                            width = if (isSelected) 2.dp else 1.dp,
-                            color = if (isSelected) MaterialTheme.colorScheme.primary
-                            else MaterialTheme.colorScheme.outline,
-                            shape = MaterialTheme.shapes.small
-                        )
-                        .clickable {
-                            selected = if (isSelected) {
-                                selected - path
-                            } else {
-                                selected + path
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(4),
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                items(cellPhotoPaths) { path ->
+                    val isSelected = selected.contains(path)
+                    Box(
+                        modifier = Modifier
+                            .aspectRatio(1f)
+                            .clip(MaterialTheme.shapes.small)
+                            .border(
+                                width = if (isSelected) 2.dp else 1.dp,
+                                color = if (isSelected) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.outline,
+                                shape = MaterialTheme.shapes.small
+                            )
+                            .clickable {
+                                selected = if (isSelected) {
+                                    selected - path
+                                } else {
+                                    selected + path
+                                }
                             }
-                        }
-                ) {
-                    AsyncImage(
-                        model = File(path),
-                        contentDescription = "Cell photo",
-                        modifier = Modifier.fillMaxSize(),
-                        contentScale = ContentScale.Crop
-                    )
+                    ) {
+                        AsyncImage(
+                            model = File(path),
+                            contentDescription = "Cell photo",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = ContentScale.Crop
+                        )
+                    }
                 }
             }
-        }
 
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(MaterialTheme.colorScheme.surface)
-                .padding(vertical = 8.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            OutlinedButton(
-                onClick = onAddMore,
-                modifier = Modifier.weight(1f)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(SoftParchment)
+                    .padding(vertical = 8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Text("Add More")
-            }
-            OutlinedButton(
-                onClick = onClearAll,
-                modifier = Modifier.weight(1f)
-            ) {
-                Text("Clear All")
-            }
-            Button(
-                onClick = {
-                    onDeleteSelected(selected.toList())
-                    selected = emptySet()
-                },
-                enabled = selected.isNotEmpty(),
-                modifier = Modifier.weight(1f)
-            ) {
-                Text("Delete Selected")
+                OutlinedButton(
+                    onClick = onAddMore,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(50),
+                    border = BorderStroke(1.dp, WarmGrey)
+                ) {
+                    Text("Add More")
+                }
+                OutlinedButton(
+                    onClick = onClearAll,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(50),
+                    border = BorderStroke(1.dp, WarmGrey)
+                ) {
+                    Text("Clear All")
+                }
+                Button(
+                    onClick = {
+                        onDeleteSelected(selected.toList())
+                        selected = emptySet()
+                    },
+                    enabled = selected.isNotEmpty(),
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(50),
+                    colors = ButtonDefaults.buttonColors(containerColor = SlateBlue)
+                ) {
+                    Text("Delete Selected")
+                }
             }
         }
     }
