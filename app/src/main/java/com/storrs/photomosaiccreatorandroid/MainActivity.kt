@@ -1178,6 +1178,7 @@ private fun MosaicZoomableCanvas(
     val transformableState = rememberTransformableState { zoomChange, offsetChange, _ ->
         scale = (scale * zoomChange).coerceIn(1f, 8f)
         offset += offsetChange
+        offset = clampOffset(viewSize, mosaicWidth, mosaicHeight, scale, offset)
     }
 
     Box(
@@ -1185,7 +1186,10 @@ private fun MosaicZoomableCanvas(
             .fillMaxWidth()
             .clip(MaterialTheme.shapes.small)
             .background(MaterialTheme.colorScheme.surfaceVariant)
-            .onSizeChanged { viewSize = it }
+            .onSizeChanged {
+                viewSize = it
+                offset = clampOffset(viewSize, mosaicWidth, mosaicHeight, scale, offset)
+            }
             .pointerInput(paintModeEnabled) {
                 if (!paintModeEnabled) {
                     detectTapGestures(
@@ -1310,6 +1314,35 @@ private fun MosaicZoomableCanvas(
             }
         }
     }
+}
+
+private fun clampOffset(
+    viewSize: IntSize,
+    imageWidth: Int,
+    imageHeight: Int,
+    scale: Float,
+    offset: Offset
+): Offset {
+    if (viewSize.width == 0 || viewSize.height == 0 || imageWidth <= 0 || imageHeight <= 0) {
+        return offset
+    }
+
+    // Base fit scale for ContentScale.Fit inside the viewport.
+    val baseScale = min(
+        viewSize.width / imageWidth.toFloat(),
+        viewSize.height / imageHeight.toFloat()
+    )
+    val scaledWidth = imageWidth * baseScale * scale
+    val scaledHeight = imageHeight * baseScale * scale
+
+    val maxShiftX = if (scaledWidth <= viewSize.width) 0f
+    else (scaledWidth - viewSize.width) / 2f
+    val maxShiftY = if (scaledHeight <= viewSize.height) 0f
+    else (scaledHeight - viewSize.height) / 2f
+
+    val clampedX = offset.x.coerceIn(-maxShiftX, maxShiftX)
+    val clampedY = offset.y.coerceIn(-maxShiftY, maxShiftY)
+    return Offset(clampedX, clampedY)
 }
 
 private fun mapToImage(
@@ -1730,6 +1763,7 @@ private fun CellPhotoGridScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
+            .statusBarsPadding()
             .padding(12.dp)
     ) {
         Row(

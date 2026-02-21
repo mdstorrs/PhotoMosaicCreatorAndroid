@@ -29,6 +29,12 @@ class MosaicViewModel(application: Application) : AndroidViewModel(application) 
     private val service = CoreMosaicGenerationService()
     private val repo = StateRepository(application)
 
+    /** Dedicated subdirectory inside app cache for all mosaic temp files. */
+    private val mosaicCacheDir: File = File(application.cacheDir, "mosaic_output").also {
+        it.mkdirs()
+        service.outputDir = it
+    }
+
     // State management
     private val _generationState = MutableStateFlow<GenerationState>(GenerationState.Idle)
     val generationState: StateFlow<GenerationState> = _generationState
@@ -267,6 +273,9 @@ class MosaicViewModel(application: Application) : AndroidViewModel(application) 
      * Generate mosaic with default settings.
      */
     fun generateMosaicWithDefaults() {
+        // Clean up previous mosaic temp files before creating new ones
+        cleanupPreviousMosaicData()
+
         val primaryPath = _primaryImagePath.value
         val cellPaths = _cellPhotoPaths.value
 
@@ -321,8 +330,59 @@ class MosaicViewModel(application: Application) : AndroidViewModel(application) 
      * Reset to idle state.
      */
     fun reset() {
+        cleanupPreviousMosaicData()
         _generationState.value = GenerationState.Idle
         _progress.value = MosaicGenerationProgress(0, "")
+    }
+
+    /**
+     * Deletes all temporary mosaic files from previous runs so local
+     * storage doesn't keep growing with every generation.
+     *
+     * Targets:
+     *  - mosaic_output/ subfolder (mosaic JPEGs, overlay JPEGs, usage CSVs)
+     *  - mosaic_composite_* files in main cache dir (preview composites)
+     *  - mosaic_overlay_* files in main cache dir (blurred overlay cache)
+     */
+    fun cleanupPreviousMosaicData() {
+        // 1. Wipe everything inside the dedicated mosaic output directory
+        mosaicCacheDir.listFiles()?.forEach { file ->
+            try { file.delete() } catch (_: Exception) {}
+        }
+
+        // 2. Clean composite & overlay caches from the main app cache dir
+        val cacheDir = getApplication<Application>().cacheDir
+        cacheDir.listFiles()?.forEach { file ->
+            if (file.isFile && (
+                        file.name.startsWith("mosaic_composite_") ||
+                        file.name.startsWith("mosaic_overlay_")
+                    )
+            ) {
+                try { file.delete() } catch (_: Exception) {}
+            }
+        }
+
+        // 3. Also sweep the system temp dir in case older runs left files there
+        val tmpDir = File(System.getProperty("java.io.tmpdir") ?: return)
+        if (tmpDir.exists() && tmpDir.canRead()) {
+            tmpDir.listFiles()?.forEach { file ->
+                if (file.isFile && (
+                            file.name.startsWith("mosaic_") ||
+                            file.name.startsWith("mosaic_overlay_") ||
+                            file.name.startsWith("mosaic_usage_")
+                        )
+                ) {
+                    try { file.delete() } catch (_: Exception) {}
+                }
+            }
+        }
+    }
+
+    /** Convenience: delete without throwing. */
+    private fun File.deleteQuietly() {
+        try {
+            if (exists()) delete()
+        } catch (_: Exception) { /* best-effort */ }
     }
 
     /**

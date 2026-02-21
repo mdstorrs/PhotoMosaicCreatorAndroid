@@ -25,6 +25,12 @@ import kotlin.random.Random
  */
 class CoreMosaicGenerationService {
 
+    /**
+     * Directory where temporary mosaic output files are written.
+     * Must be set before calling generateMosaic so cleanup can target it.
+     */
+    var outputDir: File? = null
+
     companion object {
         private const val TAG = "MosaicGeneration"
         private const val MAX_MOSAIC_DIMENSION = 2048
@@ -1413,11 +1419,13 @@ class CoreMosaicGenerationService {
     }
 
     /**
-     * Saves a bitmap as JPEG to temp directory.
+     * Saves a bitmap as JPEG to the designated output directory.
      */
     private fun saveBitmapAsJpeg(bitmap: Bitmap, prefix: String): String {
-        val tempFile = File.createTempFile(prefix, ".jpg")
-        bitmap.compress(Bitmap.CompressFormat.JPEG, 95, tempFile.outputStream().buffered())
+        val tempFile = File.createTempFile(prefix, ".jpg", outputDir)
+        tempFile.outputStream().buffered().use { out ->
+            bitmap.compress(Bitmap.CompressFormat.JPEG, 95, out)
+        }
         return tempFile.absolutePath
     }
 
@@ -1425,7 +1433,7 @@ class CoreMosaicGenerationService {
      * Writes usage report as CSV.
      */
     private fun writeUsageReport(usage: List<CellUsage>, cache: List<CellPhotoCache>): String {
-        val reportFile = File.createTempFile("mosaic_usage_", ".csv")
+        val reportFile = File.createTempFile("mosaic_usage_", ".csv", outputDir)
         val usageLookup = usage.groupBy { it.path }
 
         reportFile.bufferedWriter().use { writer ->
