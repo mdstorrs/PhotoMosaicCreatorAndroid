@@ -19,6 +19,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.SystemBarStyle
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -88,6 +89,7 @@ import com.storrs.photomosaiccreatorandroid.preview.generateFaceMaskBitmap
 import com.storrs.photomosaiccreatorandroid.preview.paintSoftBrushOnMask
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.BorderStroke
 
@@ -101,7 +103,9 @@ private val WarmGrey = Color(0xFFA8A196)
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.dark(android.graphics.Color.TRANSPARENT)
+        )
         val viewModel = ViewModelProvider(this)[MosaicViewModel::class.java]
         setContent {
             PhotoMosaicCreatorAndroidTheme {
@@ -137,7 +141,6 @@ fun MosaicGeneratorScreen(viewModel: MosaicViewModel) {
     val warmGrey = Color(0xFFA8A196)
 
     var currentStep by rememberSaveable { mutableStateOf(WizardStep.Start) }
-    var showCellPhotoGrid by rememberSaveable { mutableStateOf(false) }
     var showAdvancedSettings by rememberSaveable { mutableStateOf(false) }
     var showDebugReport by rememberSaveable { mutableStateOf(false) }
     var debugReportText by remember { mutableStateOf("") }
@@ -157,7 +160,6 @@ fun MosaicGeneratorScreen(viewModel: MosaicViewModel) {
     }
 
     BackHandler(enabled = showDebugReport) { showDebugReport = false }
-    BackHandler(enabled = showCellPhotoGrid) { showCellPhotoGrid = false }
     BackHandler(enabled = currentStep != WizardStep.Start) { goBack() }
 
     val primaryImageLauncher = rememberLauncherForActivityResult(
@@ -192,17 +194,6 @@ fun MosaicGeneratorScreen(viewModel: MosaicViewModel) {
 
     Surface(color = backgroundColor, modifier = Modifier.fillMaxSize()) {
         when {
-            showCellPhotoGrid -> {
-                CellPhotoGridScreen(
-                    cellPhotoPaths = cellPhotoPaths,
-                    onClose = { showCellPhotoGrid = false },
-                    onAddMore = { multipleImagesLauncher.launch("image/*") },
-                    onClearAll = { viewModel.clearCellPhotos() },
-                    onDeleteSelected = { selected ->
-                        viewModel.removeCellPhotos(selected)
-                    }
-                )
-            }
             currentStep == WizardStep.Preview && previewResult != null -> {
                 MosaicPreviewScreen(
                     result = previewResult!!,
@@ -219,6 +210,160 @@ fun MosaicGeneratorScreen(viewModel: MosaicViewModel) {
                         currentStep = WizardStep.Start
                     }
                 )
+            }
+            currentStep == WizardStep.CellPhotos -> {
+                // ── Full-screen Cell Photos step with grid ──
+                var selectedCells by remember { mutableStateOf(setOf<String>()) }
+                var showOverflowMenu by remember { mutableStateOf(false) }
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(SoftParchment)
+                ) {
+                    TitleBar(title = "Small Photos", onBack = goBack, barColor = deepNavy)
+
+                    // ── Photo count label ──
+                    if (cellPhotoPaths.isNotEmpty()) {
+                        Text(
+                            text = "${cellPhotoPaths.size} photos",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = WarmGrey,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 4.dp),
+                            textAlign = TextAlign.End
+                        )
+                    }
+
+                    // ── Scrollable image grid ──
+                    if (cellPhotoPaths.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth(),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = "No photos added yet.\nTap \"Add Photos\" to get started.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = WarmGrey,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    } else {
+                        LazyVerticalGrid(
+                            columns = GridCells.Fixed(4),
+                            modifier = Modifier
+                                .weight(1f)
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                            horizontalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            items(cellPhotoPaths) { path ->
+                                val isSelected = selectedCells.contains(path)
+                                Box(
+                                    modifier = Modifier
+                                        .aspectRatio(1f)
+                                        .clip(RoundedCornerShape(6.dp))
+                                        .border(
+                                            width = if (isSelected) 3.dp else 0.dp,
+                                            color = if (isSelected) SlateBlue else Color.Transparent,
+                                            shape = RoundedCornerShape(6.dp)
+                                        )
+                                        .clickable {
+                                            selectedCells = if (isSelected) {
+                                                selectedCells - path
+                                            } else {
+                                                selectedCells + path
+                                            }
+                                        }
+                                ) {
+                                    AsyncImage(
+                                        model = File(path),
+                                        contentDescription = "Cell photo",
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentScale = ContentScale.Crop
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // ── Bottom toolbar ──
+                    Divider(color = WarmGrey.copy(alpha = 0.3f), thickness = 1.dp)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(SoftParchment)
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = { multipleImagesLauncher.launch("image/*") },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = primaryAccent,
+                                contentColor = deepNavy
+                            ),
+                            shape = RoundedCornerShape(50),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(50.dp)
+                        ) {
+                            Text("Add Photos", style = MaterialTheme.typography.titleSmall)
+                        }
+                        Button(
+                            onClick = { currentStep = WizardStep.Options },
+                            enabled = cellPhotoPaths.isNotEmpty(),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = secondaryAccent,
+                                contentColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(50),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(50.dp)
+                        ) {
+                            Text("Continue", style = MaterialTheme.typography.titleSmall)
+                        }
+
+                        // ── 3-dot overflow menu ──
+                        Box {
+                            IconButton(onClick = { showOverflowMenu = true }) {
+                                Icon(
+                                    imageVector = Icons.Filled.MoreVert,
+                                    contentDescription = "More options",
+                                    tint = DeepNavy
+                                )
+                            }
+                            DropdownMenu(
+                                expanded = showOverflowMenu,
+                                onDismissRequest = { showOverflowMenu = false }
+                            ) {
+                                DropdownMenuItem(
+                                    text = { Text("Delete Selected") },
+                                    onClick = {
+                                        viewModel.removeCellPhotos(selectedCells.toList())
+                                        selectedCells = emptySet()
+                                        showOverflowMenu = false
+                                    },
+                                    enabled = selectedCells.isNotEmpty()
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("Clear All") },
+                                    onClick = {
+                                        viewModel.clearCellPhotos()
+                                        selectedCells = emptySet()
+                                        showOverflowMenu = false
+                                    },
+                                    enabled = cellPhotoPaths.isNotEmpty()
+                                )
+                            }
+                        }
+                    }
+                }
             }
             else -> {
                 Column(
@@ -252,18 +397,36 @@ fun MosaicGeneratorScreen(viewModel: MosaicViewModel) {
                                 verticalArrangement = Arrangement.spacedBy(16.dp)
                             ) {
                                 if (primaryImagePath != null) {
+                                    // Read image dimensions to get aspect ratio
+                                    val imageAspectRatio = remember(primaryImagePath) {
+                                        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                                        BitmapFactory.decodeFile(primaryImagePath, opts)
+                                        if (opts.outWidth > 0 && opts.outHeight > 0) {
+                                            opts.outWidth.toFloat() / opts.outHeight.toFloat()
+                                        } else {
+                                            1f
+                                        }
+                                    }
+                                    // Square bounding box: width = page width, height = page width
                                     Box(
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .aspectRatio(1f)
-                                            .clip(RoundedCornerShape(14.dp))
-                                            .background(backgroundColor)
+                                            .aspectRatio(1f),
+                                        contentAlignment = Alignment.Center
                                     ) {
+                                        // Size the image to fit within the square while keeping proportions
+                                        val imageModifier = if (imageAspectRatio >= 1f) {
+                                            // Landscape or square: fill width, height determined by ratio
+                                            Modifier.fillMaxWidth().aspectRatio(imageAspectRatio)
+                                        } else {
+                                            // Portrait: fill height, width determined by ratio
+                                            Modifier.fillMaxHeight().aspectRatio(imageAspectRatio)
+                                        }
                                         AsyncImage(
                                             model = File(primaryImagePath!!),
                                             contentDescription = "Primary image preview",
-                                            modifier = Modifier.fillMaxSize(),
-                                            contentScale = ContentScale.Fit
+                                            modifier = imageModifier.clip(RoundedCornerShape(16.dp)),
+                                            contentScale = ContentScale.Crop
                                         )
                                     }
                                 }
@@ -280,34 +443,7 @@ fun MosaicGeneratorScreen(viewModel: MosaicViewModel) {
                                 )
                             }
                         }
-                        WizardStep.CellPhotos -> {
-                            TitleBar(title = "Small Photos", onBack = goBack, barColor = deepNavy)
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(16.dp),
-                                verticalArrangement = Arrangement.spacedBy(16.dp)
-                            ) {
-                                LargePrimaryButton(
-                                    text = if (cellPhotoPaths.isEmpty()) "Add small photos" else "Add More Photos",
-                                    onClick = { multipleImagesLauncher.launch("image/*") },
-                                    color = primaryAccent
-                                )
-                                LargeSecondaryButton(
-                                    text = "${cellPhotoPaths.size} photos selected",
-                                    onClick = { showCellPhotoGrid = true },
-                                    enabled = cellPhotoPaths.isNotEmpty(),
-                                    highlight = true,
-                                    color = secondaryAccent
-                                )
-                                LargeSecondaryButton(
-                                    text = "Continue",
-                                    onClick = { currentStep = WizardStep.Options },
-                                    enabled = cellPhotoPaths.isNotEmpty(),
-                                    color = secondaryAccent
-                                )
-                            }
-                        }
+                        WizardStep.CellPhotos -> Unit // handled above
                         WizardStep.Options -> {
                             TitleBar(title = "Select Options", onBack = goBack, barColor = deepNavy)
                             Column(
@@ -1817,104 +1953,6 @@ private fun DebugReportDialog(
     )
 }
 
-@Composable
-private fun CellPhotoGridScreen(
-    cellPhotoPaths: List<String>,
-    onClose: () -> Unit,
-    onAddMore: () -> Unit,
-    onClearAll: () -> Unit,
-    onDeleteSelected: (List<String>) -> Unit
-) {
-    var selected by remember { mutableStateOf(setOf<String>()) }
-
-    Column(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color(0xFFF9F7F2))
-    ) {
-        TitleBar(title = "Cell Photos", onBack = onClose, barColor = Color(0xFF1F2D3D))
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(12.dp)
-        ) {
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(4),
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth(),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                items(cellPhotoPaths) { path ->
-                    val isSelected = selected.contains(path)
-                    Box(
-                        modifier = Modifier
-                            .aspectRatio(1f)
-                            .clip(MaterialTheme.shapes.small)
-                            .border(
-                                width = if (isSelected) 2.dp else 1.dp,
-                                color = if (isSelected) MaterialTheme.colorScheme.primary
-                                else MaterialTheme.colorScheme.outline,
-                                shape = MaterialTheme.shapes.small
-                            )
-                            .clickable {
-                                selected = if (isSelected) {
-                                    selected - path
-                                } else {
-                                    selected + path
-                                }
-                            }
-                    ) {
-                        AsyncImage(
-                            model = File(path),
-                            contentDescription = "Cell photo",
-                            modifier = Modifier.fillMaxSize(),
-                            contentScale = ContentScale.Crop
-                        )
-                    }
-                }
-            }
-
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .background(SoftParchment)
-                    .padding(vertical = 8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                OutlinedButton(
-                    onClick = onAddMore,
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(50),
-                    border = BorderStroke(1.dp, WarmGrey)
-                ) {
-                    Text("Add More")
-                }
-                OutlinedButton(
-                    onClick = onClearAll,
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(50),
-                    border = BorderStroke(1.dp, WarmGrey)
-                ) {
-                    Text("Clear All")
-                }
-                Button(
-                    onClick = {
-                        onDeleteSelected(selected.toList())
-                        selected = emptySet()
-                    },
-                    enabled = selected.isNotEmpty(),
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(50),
-                    colors = ButtonDefaults.buttonColors(containerColor = SlateBlue)
-                ) {
-                    Text("Delete Selected")
-                }
-            }
-        }
-    }
-}
 
 private fun getRealPathFromURI(context: Context, uri: Uri): String? {
     if (uri.scheme == "file") {
