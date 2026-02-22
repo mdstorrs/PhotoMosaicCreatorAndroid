@@ -9,7 +9,9 @@ import androidx.lifecycle.viewModelScope
 import com.storrs.photomosaiccreatorandroid.models.*
 import com.storrs.photomosaiccreatorandroid.persistence.StateRepository
 import com.storrs.photomosaiccreatorandroid.services.CoreMosaicGenerationService
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -52,6 +54,9 @@ class MosaicViewModel(application: Application) : AndroidViewModel(application) 
     val settings: StateFlow<MosaicSettingsState> = _settings
 
     private val orientationCache = mutableMapOf<String, PhotoOrientation>()
+
+    /** Tracks the active generation coroutine so it can be cancelled. */
+    private var generationJob: Job? = null
 
     init {
         restoreState()
@@ -289,7 +294,8 @@ class MosaicViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
 
-        viewModelScope.launch {
+        generationJob?.cancel()
+        generationJob = viewModelScope.launch {
             _generationState.value = GenerationState.Loading
             try {
                 // Create project with default settings
@@ -311,6 +317,9 @@ class MosaicViewModel(application: Application) : AndroidViewModel(application) 
                         result.errorMessage ?: "Unknown error occurred"
                     )
                 }
+            } catch (e: CancellationException) {
+                // Coroutine was cancelled — state already set to Idle by cancelGeneration()
+                throw e
             } catch (e: Exception) {
                 _generationState.value = GenerationState.Error(
                     e.message ?: "Unknown error occurred"
@@ -323,7 +332,10 @@ class MosaicViewModel(application: Application) : AndroidViewModel(application) 
      * Cancel the current generation.
      */
     fun cancelGeneration() {
+        generationJob?.cancel()
+        generationJob = null
         _generationState.value = GenerationState.Idle
+        _progress.value = MosaicGenerationProgress(0, "")
     }
 
     /**

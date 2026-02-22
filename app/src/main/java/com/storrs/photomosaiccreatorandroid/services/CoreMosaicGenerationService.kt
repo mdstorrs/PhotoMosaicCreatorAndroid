@@ -294,6 +294,7 @@ class CoreMosaicGenerationService {
         var lastReported = -1
 
         for (photo in cellPhotos) {
+            ensureActive()
             // Skip photos that don't match required orientation
             if (requiredOrientation != null &&
                 photo.orientation != requiredOrientation &&
@@ -877,6 +878,7 @@ class CoreMosaicGenerationService {
         primary.getPixels(primaryPixels, 0, primary.width, 0, 0, primary.width, primary.height)
 
         for (row in 0 until grid.rows) {
+            ensureActive()
             for (col in 0 until grid.columns) {
                 val x = col * grid.cellWidth
                 val y = row * grid.cellHeight
@@ -904,6 +906,7 @@ class CoreMosaicGenerationService {
         if (useAllImages) {
             reportProgress(onProgress, 20, "Placing all cell images (${cache.size} photos)")
             for (item in cache) {
+                ensureActive()
                 if (availablePlacements.isEmpty()) break
                 if (item.useCount >= maxUses) continue
 
@@ -938,6 +941,7 @@ class CoreMosaicGenerationService {
         var lastReported = 25
 
         for (placement in availablePlacements) {
+            ensureActive()
             val match = findBestMatch(
                 cache, placement.targetQuadrants, maxUses, minSpacing, minSpacing,
                 placement.row, placement.col, randomCellCandidates,
@@ -1022,6 +1026,7 @@ class CoreMosaicGenerationService {
 
         var rowIndex = 0
         while (rowIndex * landscapeHeightUnits < tRows) {
+            ensureActive()
             val baseYUnit = (rowIndex * landscapeHeightUnits) - topPaddingUnits
             val rowOffsetUnits = -rowIndex * portraitWidthUnits
             var xUnit = leftPaddingUnits + rowOffsetUnits
@@ -1099,6 +1104,7 @@ class CoreMosaicGenerationService {
         if (useAllImages) {
             reportProgress(onProgress, 20, "Placing all cell images (${cache.size} photos)")
             for (item in cache) {
+                ensureActive()
                 if (availablePlacements.isEmpty()) break
                 if (item.useCount >= maxUses) continue
 
@@ -1148,6 +1154,7 @@ class CoreMosaicGenerationService {
         } else 0
 
         for (placement in availablePlacements) {
+            ensureActive()
             if (!tryPlaceParquetCell(
                     cache, canvas, lastUsedPixelPositions, usage, rowSpacingPixels, colSpacingPixels, maxUses,
                     colorAdjustPercent, occupied, unitSize, totalColumns, tRows,

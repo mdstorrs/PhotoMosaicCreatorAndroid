@@ -24,6 +24,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.ui.res.painterResource
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
@@ -92,6 +93,17 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import com.storrs.photomosaiccreatorandroid.models.PatternKind
+import kotlin.math.floor
 
 // ── Color Palette ──
 private val SoftParchment = Color(0xFFF9F7F2)
@@ -141,7 +153,6 @@ fun MosaicGeneratorScreen(viewModel: MosaicViewModel) {
     val warmGrey = Color(0xFFA8A196)
 
     var currentStep by rememberSaveable { mutableStateOf(WizardStep.Start) }
-    var showAdvancedSettings by rememberSaveable { mutableStateOf(false) }
     var showDebugReport by rememberSaveable { mutableStateOf(false) }
     var debugReportText by remember { mutableStateOf("") }
     var previewResult by remember { mutableStateOf<com.storrs.photomosaiccreatorandroid.models.MosaicResult?>(null) }
@@ -297,9 +308,10 @@ fun MosaicGeneratorScreen(viewModel: MosaicViewModel) {
                         modifier = Modifier
                             .fillMaxWidth()
                             .background(SoftParchment)
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            .padding(start = 16.dp, end = 4.dp, top = 14.dp, bottom = 14.dp)
+                            .navigationBarsPadding(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
                         Button(
                             onClick = { multipleImagesLauncher.launch("image/*") },
@@ -310,7 +322,7 @@ fun MosaicGeneratorScreen(viewModel: MosaicViewModel) {
                             shape = RoundedCornerShape(50),
                             modifier = Modifier
                                 .weight(1f)
-                                .height(50.dp)
+                                .height(60.dp)
                         ) {
                             Text("Add Photos", style = MaterialTheme.typography.titleSmall)
                         }
@@ -324,7 +336,7 @@ fun MosaicGeneratorScreen(viewModel: MosaicViewModel) {
                             shape = RoundedCornerShape(50),
                             modifier = Modifier
                                 .weight(1f)
-                                .height(50.dp)
+                                .height(60.dp)
                         ) {
                             Text("Continue", style = MaterialTheme.typography.titleSmall)
                         }
@@ -365,6 +377,293 @@ fun MosaicGeneratorScreen(viewModel: MosaicViewModel) {
                     }
                 }
             }
+            currentStep == WizardStep.Options -> {
+                // ── Full-screen Options step with bottom toolbar & slide-out panel ──
+                var showOptionsPanel by remember { mutableStateOf(false) }
+
+                Box(modifier = Modifier.fillMaxSize()) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .background(SoftParchment)
+                    ) {
+                    TitleBar(title = "Select Options", onBack = goBack, barColor = deepNavy)
+
+                    // ── Scrollable middle area (image preview) ──
+                    Column(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth()
+                            .verticalScroll(rememberScrollState())
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        if (primaryImagePath != null) {
+                            MosaicGridPreview(
+                                primaryImagePath = primaryImagePath!!,
+                                pattern = settings.pattern,
+                                printSize = settings.selectedPrintSize,
+                                cellSize = settings.selectedCellSize,
+                                landscapeCount = settings.landscapeCount,
+                                portraitCount = settings.portraitCount
+                            )
+                        }
+                    }
+
+                    // ── Bottom toolbar ──
+                    Divider(color = WarmGrey.copy(alpha = 0.3f), thickness = 1.dp)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(SoftParchment)
+                            .padding(start = 16.dp, end = 4.dp, top = 14.dp, bottom = 14.dp)
+                            .navigationBarsPadding(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Button(
+                            onClick = { showOptionsPanel = true },
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = primaryAccent,
+                                contentColor = deepNavy
+                            ),
+                            shape = RoundedCornerShape(50),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(60.dp)
+                        ) {
+                            Text("Options", style = MaterialTheme.typography.titleSmall)
+                        }
+
+                        Button(
+                            onClick = { viewModel.generateMosaicWithDefaults() },
+                            enabled = primaryImagePath != null && cellPhotoPaths.isNotEmpty(),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = secondaryAccent,
+                                contentColor = Color.White
+                            ),
+                            shape = RoundedCornerShape(50),
+                            modifier = Modifier
+                                .weight(1f)
+                                .height(60.dp)
+                        ) {
+                            Text("Go!", style = MaterialTheme.typography.titleSmall)
+                        }
+                    }
+                    }
+
+                    // ── Animated slide-out options panel (scrim + panel) ──
+                    // Scrim with fade
+                    AnimatedVisibility(
+                        visible = showOptionsPanel,
+                        enter = fadeIn(animationSpec = tween(300)),
+                        exit = fadeOut(animationSpec = tween(300))
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color.Black.copy(alpha = 0.4f))
+                                .clickable { showOptionsPanel = false }
+                        )
+                    }
+                    // Panel sliding down from top
+                    AnimatedVisibility(
+                        visible = showOptionsPanel,
+                        enter = slideInVertically(
+                            initialOffsetY = { fullHeight -> -fullHeight },
+                            animationSpec = tween(350)
+                        ) + fadeIn(animationSpec = tween(350)),
+                        exit = slideOutVertically(
+                            targetOffsetY = { fullHeight -> -fullHeight },
+                            animationSpec = tween(300)
+                        ) + fadeOut(animationSpec = tween(300))
+                    ) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(
+                                    Color.White,
+                                    shape = RoundedCornerShape(bottomStart = 20.dp, bottomEnd = 20.dp)
+                                )
+                                .statusBarsPadding()
+                                .padding(bottom = 8.dp)
+                        ) {
+                            // Panel header
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Text(
+                                    "Options",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = DeepNavy
+                                )
+                                TextButton(onClick = { showOptionsPanel = false }) {
+                                    Text("Done", color = SlateBlue)
+                                }
+                            }
+
+                            Divider(color = WarmGrey.copy(alpha = 0.2f), thickness = 1.dp)
+
+                            // Panel content – scrollable
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .verticalScroll(rememberScrollState())
+                                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                                verticalArrangement = Arrangement.spacedBy(14.dp)
+                            ) {
+                                // Print Size
+                                SettingsDropdown(
+                                    label = "Print Size",
+                                    selectedLabel = formatPrintSize(settings.selectedPrintSize),
+                                    options = settings.printSizes.map { formatPrintSize(it) },
+                                    onSelected = { index ->
+                                        settings.printSizes.getOrNull(index)
+                                            ?.let { viewModel.updatePrintSize(it) }
+                                    }
+                                )
+
+                                // Cell Photo Size
+                                SettingsDropdown(
+                                    label = "Cell Photo Size",
+                                    selectedLabel = settings.selectedCellSize.label,
+                                    options = settings.cellSizes.map { it.label },
+                                    onSelected = { index ->
+                                        settings.cellSizes.getOrNull(index)
+                                            ?.let { viewModel.updateCellSize(it) }
+                                    }
+                                )
+
+                                Divider(
+                                    color = WarmGrey.copy(alpha = 0.15f),
+                                    thickness = 1.dp,
+                                    modifier = Modifier.padding(vertical = 4.dp)
+                                )
+
+                                // ── Advanced settings inline ──
+                                Text(
+                                    "Advanced",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    color = DeepNavy
+                                )
+
+                                // Color Change
+                                Text(
+                                    "Color Change: ${settings.colorChangePercent}%",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = DeepNavy
+                                )
+                                Slider(
+                                    value = settings.colorChangePercent.toFloat(),
+                                    onValueChange = { viewModel.updateColorChange(it.roundToInt()) },
+                                    valueRange = 0f..100f,
+                                    colors = SliderDefaults.colors(
+                                        thumbColor = SlateBlue,
+                                        activeTrackColor = SlateBlue
+                                    )
+                                )
+
+                                // Pattern
+                                val patternOptions = PatternKind.values().toList()
+                                SettingsDropdown(
+                                    label = "Pattern",
+                                    selectedLabel = settings.pattern.name,
+                                    options = patternOptions.map { it.name },
+                                    onSelected = { index ->
+                                        patternOptions.getOrNull(index)
+                                            ?.let { viewModel.updatePattern(it) }
+                                    }
+                                )
+
+                                // Use All Images
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Checkbox(
+                                        checked = settings.useAllImages,
+                                        onCheckedChange = { viewModel.updateUseAllImages(it) },
+                                        colors = CheckboxDefaults.colors(checkedColor = SlateBlue)
+                                    )
+                                    Text(
+                                        "Use All Images",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = DeepNavy
+                                    )
+                                }
+
+                                // Mirror Images
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Checkbox(
+                                        checked = settings.mirrorImages,
+                                        onCheckedChange = { viewModel.updateMirrorImages(it) },
+                                        colors = CheckboxDefaults.colors(checkedColor = SlateBlue)
+                                    )
+                                    Text(
+                                        "Mirror Images",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = DeepNavy
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    // ── Fullscreen progress overlay ──
+                    if (generationState is GenerationState.Loading) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(Color.Black.copy(alpha = 0.7f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(24.dp)
+                            ) {
+                                Box(
+                                    contentAlignment = Alignment.Center,
+                                    modifier = Modifier.size(160.dp)
+                                ) {
+                                    CircularProgressIndicator(
+                                        progress = { progress.percentComplete / 100f },
+                                        modifier = Modifier.size(160.dp),
+                                        color = GoldenLab,
+                                        strokeWidth = 8.dp,
+                                        trackColor = Color.White.copy(alpha = 0.2f)
+                                    )
+                                    Text(
+                                        text = "${progress.percentComplete}%",
+                                        style = MaterialTheme.typography.headlineLarge,
+                                        color = Color.White
+                                    )
+                                }
+
+                                Text(
+                                    text = "Creating mosaic",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    color = Color.White.copy(alpha = 0.8f)
+                                )
+
+                                Button(
+                                    onClick = { viewModel.cancelGeneration() },
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = Color.White.copy(alpha = 0.2f),
+                                        contentColor = Color.White
+                                    ),
+                                    shape = RoundedCornerShape(50),
+                                    modifier = Modifier
+                                        .width(160.dp)
+                                        .height(50.dp)
+                                ) {
+                                    Text("Cancel", style = MaterialTheme.typography.titleSmall)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             else -> {
                 Column(
                     modifier = Modifier
@@ -384,7 +683,8 @@ fun MosaicGeneratorScreen(viewModel: MosaicViewModel) {
                                 LargePrimaryButton(
                                     text = "Create Mosaic",
                                     onClick = { currentStep = WizardStep.MainPhoto },
-                                    color = primaryAccent
+                                    color = secondaryAccent,
+                                    textColor = Color.White
                                 )
                             }
                         }
@@ -396,30 +696,27 @@ fun MosaicGeneratorScreen(viewModel: MosaicViewModel) {
                                     .padding(16.dp),
                                 verticalArrangement = Arrangement.spacedBy(16.dp)
                             ) {
-                                if (primaryImagePath != null) {
-                                    // Read image dimensions to get aspect ratio
-                                    val imageAspectRatio = remember(primaryImagePath) {
-                                        val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                                        BitmapFactory.decodeFile(primaryImagePath, opts)
-                                        if (opts.outWidth > 0 && opts.outHeight > 0) {
-                                            opts.outWidth.toFloat() / opts.outHeight.toFloat()
-                                        } else {
-                                            1f
+                                // Square bounding box: always visible
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .aspectRatio(1f),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    if (primaryImagePath != null) {
+                                        // Read image dimensions to get aspect ratio
+                                        val imageAspectRatio = remember(primaryImagePath) {
+                                            val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                                            BitmapFactory.decodeFile(primaryImagePath, opts)
+                                            if (opts.outWidth > 0 && opts.outHeight > 0) {
+                                                opts.outWidth.toFloat() / opts.outHeight.toFloat()
+                                            } else {
+                                                1f
+                                            }
                                         }
-                                    }
-                                    // Square bounding box: width = page width, height = page width
-                                    Box(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .aspectRatio(1f),
-                                        contentAlignment = Alignment.Center
-                                    ) {
-                                        // Size the image to fit within the square while keeping proportions
                                         val imageModifier = if (imageAspectRatio >= 1f) {
-                                            // Landscape or square: fill width, height determined by ratio
                                             Modifier.fillMaxWidth().aspectRatio(imageAspectRatio)
                                         } else {
-                                            // Portrait: fill height, width determined by ratio
                                             Modifier.fillMaxHeight().aspectRatio(imageAspectRatio)
                                         }
                                         AsyncImage(
@@ -427,6 +724,16 @@ fun MosaicGeneratorScreen(viewModel: MosaicViewModel) {
                                             contentDescription = "Primary image preview",
                                             modifier = imageModifier.clip(RoundedCornerShape(16.dp)),
                                             contentScale = ContentScale.Crop
+                                        )
+                                    } else {
+                                        // Placeholder image
+                                        Image(
+                                            painter = painterResource(id = R.drawable.main_image),
+                                            contentDescription = "Main image placeholder",
+                                            modifier = Modifier
+                                                .fillMaxSize()
+                                                .clip(RoundedCornerShape(16.dp)),
+                                            contentScale = ContentScale.Fit
                                         )
                                     }
                                 }
@@ -444,67 +751,13 @@ fun MosaicGeneratorScreen(viewModel: MosaicViewModel) {
                             }
                         }
                         WizardStep.CellPhotos -> Unit // handled above
-                        WizardStep.Options -> {
-                            TitleBar(title = "Select Options", onBack = goBack, barColor = deepNavy)
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(16.dp),
-                                verticalArrangement = Arrangement.spacedBy(16.dp)
-                            ) {
-                                SettingsDropdown(
-                                    label = "Print Size",
-                                    selectedLabel = formatPrintSize(settings.selectedPrintSize),
-                                    options = settings.printSizes.map { formatPrintSize(it) },
-                                    onSelected = { index ->
-                                        settings.printSizes.getOrNull(index)
-                                            ?.let { viewModel.updatePrintSize(it) }
-                                    },
-                                    highlight = true
-                                )
-                                SettingsDropdown(
-                                    label = "Cell Photo Size",
-                                    selectedLabel = settings.selectedCellSize.label,
-                                    options = settings.cellSizes.map { it.label },
-                                    onSelected = { index ->
-                                        settings.cellSizes.getOrNull(index)
-                                            ?.let { viewModel.updateCellSize(it) }
-                                    },
-                                    highlight = true
-                                )
-                                SubtleButton(
-                                    text = "Advanced",
-                                    onClick = { showAdvancedSettings = true }
-                                )
-                                LargePrimaryButton(
-                                    text = "Go!",
-                                    onClick = {
-                                        viewModel.generateMosaicWithDefaults()
-                                    },
-                                    color = primaryAccent,
-                                    enabled = primaryImagePath != null && cellPhotoPaths.isNotEmpty()
-                                )
-                                if (generationState is GenerationState.Loading) {
-                                    GenerationProgressUI(progress, viewModel)
-                                }
-                            }
-                        }
+                        WizardStep.Options -> Unit // handled above
                         WizardStep.Preview -> Unit
                     }
                 }
             }
         }
 
-        if (showAdvancedSettings) {
-            AdvancedSettingsDialog(
-                settings = settings,
-                onDismiss = { showAdvancedSettings = false },
-                onUpdateColorChange = { viewModel.updateColorChange(it) },
-                onUpdatePattern = { viewModel.updatePattern(it) },
-                onUpdateUseAllImages = { viewModel.updateUseAllImages(it) },
-                onUpdateMirrorImages = { viewModel.updateMirrorImages(it) }
-            )
-        }
 
         if (showDebugReport) {
             DebugReportDialog(
@@ -569,7 +822,8 @@ private fun LargePrimaryButton(
     text: String,
     onClick: () -> Unit,
     color: Color,
-    enabled: Boolean = true
+    enabled: Boolean = true,
+    textColor: Color = DeepNavy
 ) {
     Box(
         modifier = Modifier.fillMaxWidth(),
@@ -580,12 +834,12 @@ private fun LargePrimaryButton(
             enabled = enabled,
             colors = ButtonDefaults.buttonColors(
                 containerColor = color,
-                contentColor = DeepNavy
+                contentColor = textColor
             ),
             shape = RoundedCornerShape(50),
             modifier = Modifier
                 .fillMaxWidth(0.6f)
-                .height(64.dp)
+                .height(60.dp)
         ) {
             Text(text, style = MaterialTheme.typography.titleMedium)
         }
@@ -1161,11 +1415,15 @@ fun MosaicPreviewScreen(
         }
 
         // ── Bottom toolbar: Save / Share / Start again ──
+        Divider(color = WarmGrey.copy(alpha = 0.3f), thickness = 1.dp)
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                .background(SoftParchment)
+                .padding(start = 16.dp, end = 4.dp, top = 14.dp, bottom = 14.dp)
+                .navigationBarsPadding(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
         ) {
             Button(
                 onClick = {
@@ -1192,7 +1450,7 @@ fun MosaicPreviewScreen(
                 },
                 modifier = Modifier
                     .weight(1f)
-                    .height(50.dp),
+                    .height(60.dp),
                 enabled = mosaicFile != null && !isSaving,
                 shape = RoundedCornerShape(50),
                 colors = ButtonDefaults.buttonColors(containerColor = SlateBlue)
@@ -1219,7 +1477,7 @@ fun MosaicPreviewScreen(
                 },
                 modifier = Modifier
                     .weight(1f)
-                    .height(50.dp),
+                    .height(60.dp),
                 enabled = mosaicFile != null,
                 shape = RoundedCornerShape(50),
                 colors = ButtonDefaults.buttonColors(containerColor = SlateBlue)
@@ -1230,11 +1488,220 @@ fun MosaicPreviewScreen(
                 onClick = onStartAgain,
                 modifier = Modifier
                     .weight(1f)
-                    .height(50.dp),
+                    .height(60.dp),
                 shape = RoundedCornerShape(50),
                 border = BorderStroke(1.dp, WarmGrey)
             ) {
                 Text("Start Again", style = MaterialTheme.typography.titleSmall)
+            }
+        }
+    }
+}
+
+/**
+ * Displays the primary image with a white grid overlay representing the tile pattern.
+ * For Square: uniform grid. For Parquet: alternating landscape (4:3) and portrait (3:4) cells.
+ */
+@Composable
+private fun MosaicGridPreview(
+    primaryImagePath: String,
+    pattern: PatternKind,
+    printSize: com.storrs.photomosaiccreatorandroid.ui.viewmodel.PrintSizeOption,
+    cellSize: com.storrs.photomosaiccreatorandroid.ui.viewmodel.CellSizeOption,
+    landscapeCount: Int,
+    portraitCount: Int
+) {
+    // Calculate grid dimensions based on print size and cell size
+    val printWidthMm = printSize.widthInches * 25.4
+    val printHeightMm = printSize.heightInches * 25.4
+    val cellMm = cellSize.sizeMm
+
+    // Print aspect ratio (always portrait orientation for the mosaic output)
+    val printAspect = (printWidthMm / printHeightMm).toFloat()
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .aspectRatio(printAspect)
+            .clip(RoundedCornerShape(16.dp)),
+        contentAlignment = Alignment.Center
+    ) {
+        // Main image fills the box, cropped to match print proportions
+        AsyncImage(
+            model = File(primaryImagePath),
+            contentDescription = "Main image with grid overlay",
+            modifier = Modifier.fillMaxSize(),
+            contentScale = ContentScale.Crop
+        )
+
+        // Grid overlay drawn on top
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            val w = size.width
+            val h = size.height
+            val lineColor = Color.White.copy(alpha = 0.6f)
+            val lineWidth = 1.5f
+
+            when (pattern) {
+                PatternKind.Square -> {
+                    val cols = floor(printWidthMm / cellMm).toInt().coerceAtLeast(1)
+                    val rows = floor(printHeightMm / cellMm).toInt().coerceAtLeast(1)
+                    val cellW = w / cols
+                    val cellH = h / rows
+
+                    // Vertical lines
+                    for (i in 1 until cols) {
+                        val x = i * cellW
+                        drawLine(lineColor, Offset(x, 0f), Offset(x, h), strokeWidth = lineWidth)
+                    }
+                    // Horizontal lines
+                    for (i in 1 until rows) {
+                        val y = i * cellH
+                        drawLine(lineColor, Offset(0f, y), Offset(w, y), strokeWidth = lineWidth)
+                    }
+                }
+
+                PatternKind.Parquet -> {
+                    // Mirror the real engine: base cell is square, forced to 4:3 for parquet
+                    // Landscape = 4 units wide × 3 units tall
+                    // Portrait  = 3 units wide × 4 units tall
+
+                    // Compute parquet ratio
+                    val ratioL: Int
+                    val ratioP: Int
+                    if (landscapeCount == 0 && portraitCount == 0) {
+                        ratioL = 2; ratioP = 1
+                    } else if (landscapeCount >= portraitCount) {
+                        ratioP = 1
+                        ratioL = if (portraitCount > 0) maxOf(1, landscapeCount / portraitCount) else 2
+                    } else {
+                        ratioL = 1
+                        ratioP = if (landscapeCount > 0) maxOf(1, portraitCount / landscapeCount) else 2
+                    }
+
+                    // Build pattern sequence: [L, L, ..., P, P, ...]
+                    val sequence = mutableListOf<Boolean>() // true = landscape
+                    repeat(ratioL) { sequence.add(true) }
+                    repeat(ratioP) { sequence.add(false) }
+
+                    // Use a unit grid approach matching the real engine
+                    // Unit size = cellMm / 4 so landscape = 4 units, portrait = 3 units
+                    val unitMm = cellMm / 4.0
+                    val lWu = 4  // landscape width in units
+                    val lHu = 3  // landscape height in units
+                    val pWu = 3  // portrait width in units
+                    val pHu = 4  // portrait height in units
+                    val deltaUnits = pHu - lHu  // = 1
+
+                    // Scale from units to pixels on screen
+                    val unitPxX = (w / (printWidthMm / unitMm)).toFloat()
+                    val unitPxY = (h / (printHeightMm / unitMm)).toFloat()
+
+                    // How many unit columns/rows fit in the print area
+                    val unitColumns = (printWidthMm / unitMm).toInt()
+                    val unitRows = (printHeightMm / unitMm).toInt()
+
+                    // Padding calculations (matching real engine)
+                    val cycleWidthUnits = (ratioL * lWu) + (ratioP * pWu)
+                    val cyclesAcross = maxOf(1, (unitColumns + cycleWidthUnits - 1) / cycleWidthUnits) + 1
+                    val maxPortraitsPerRow = ratioP * cyclesAcross
+                    val topPaddingUnits = deltaUnits * maxPortraitsPerRow
+                    val rowCount = maxOf(1, (unitRows + topPaddingUnits + lHu - 1) / lHu)
+                    val leftPaddingUnits = pWu * rowCount
+                    val totalColumns = unitColumns + leftPaddingUnits + cycleWidthUnits
+                    val tRows = unitRows + topPaddingUnits + pHu
+
+                    // Occupancy grid for the preview
+                    val occupied = Array(tRows) { BooleanArray(totalColumns) }
+
+                    for (rowIdx in 0 until rowCount) {
+                        if (rowIdx * lHu >= tRows) break
+                        val baseYUnit = (rowIdx * lHu) - topPaddingUnits
+                        val rowOffsetUnits = -rowIdx * pWu
+                        var xUnit = leftPaddingUnits + rowOffsetUnits
+                        var patternIndex = 0
+                        var currentYUnit = baseYUnit
+
+                        while (xUnit < totalColumns) {
+                            val yUnitForOccupancy = currentYUnit + topPaddingUnits
+                            if (yUnitForOccupancy < 0 || yUnitForOccupancy >= tRows || xUnit < 0) {
+                                xUnit++
+                                continue
+                            }
+
+                            val isLandscape = sequence[patternIndex]
+                            val wUnits = if (isLandscape) lWu else pWu
+                            val hUnits = if (isLandscape) lHu else pHu
+
+                            // Check occupancy
+                            var canPlace = true
+                            if (xUnit + wUnits > totalColumns || yUnitForOccupancy + hUnits > tRows) {
+                                canPlace = false
+                            } else {
+                                for (dy in 0 until hUnits) {
+                                    for (dx in 0 until wUnits) {
+                                        if (occupied[yUnitForOccupancy + dy][xUnit + dx]) {
+                                            canPlace = false
+                                            break
+                                        }
+                                    }
+                                    if (!canPlace) break
+                                }
+                            }
+
+                            if (!canPlace) {
+                                xUnit++
+                                continue
+                            }
+
+                            // Mark occupied
+                            for (dy in 0 until hUnits) {
+                                for (dx in 0 until wUnits) {
+                                    occupied[yUnitForOccupancy + dy][xUnit + dx] = true
+                                }
+                            }
+
+                            // Convert to screen pixel coordinates
+                            val pixelX = (xUnit - leftPaddingUnits) * unitPxX
+                            val pixelY = currentYUnit * unitPxY
+                            val pixelW = wUnits * unitPxX
+                            val pixelH = hUnits * unitPxY
+
+                            // Only draw if at least partially visible
+                            if (pixelX + pixelW > 0 && pixelY + pixelH > 0 && pixelX < w && pixelY < h) {
+                                drawRect(
+                                    color = lineColor,
+                                    topLeft = Offset(pixelX, pixelY),
+                                    size = androidx.compose.ui.geometry.Size(pixelW, pixelH),
+                                    style = Stroke(width = lineWidth)
+                                )
+                            }
+
+                            if (!isLandscape && deltaUnits > 0) {
+                                currentYUnit += deltaUnits
+                            }
+
+                            patternIndex = (patternIndex + 1) % sequence.size
+                            xUnit += wUnits
+                        }
+                    }
+                }
+
+                else -> {
+                    // Landscape or Portrait only — simple uniform grid
+                    val cols = floor(printWidthMm / cellMm).toInt().coerceAtLeast(1)
+                    val rows = floor(printHeightMm / cellMm).toInt().coerceAtLeast(1)
+                    val cellW = w / cols
+                    val cellH = h / rows
+
+                    for (i in 1 until cols) {
+                        val x = i * cellW
+                        drawLine(lineColor, Offset(x, 0f), Offset(x, h), strokeWidth = lineWidth)
+                    }
+                    for (i in 1 until rows) {
+                        val y = i * cellH
+                        drawLine(lineColor, Offset(0f, y), Offset(w, y), strokeWidth = lineWidth)
+                    }
+                }
             }
         }
     }
@@ -1868,62 +2335,6 @@ private fun formatPrintSize(option: com.storrs.photomosaiccreatorandroid.ui.view
     return "${option.label} (${option.widthInches}\" x ${option.heightInches}\")"
 }
 
-@Composable
-private fun AdvancedSettingsDialog(
-    settings: com.storrs.photomosaiccreatorandroid.ui.viewmodel.MosaicSettingsState,
-    onDismiss: () -> Unit,
-    onUpdateColorChange: (Int) -> Unit,
-    onUpdatePattern: (com.storrs.photomosaiccreatorandroid.models.PatternKind) -> Unit,
-    onUpdateUseAllImages: (Boolean) -> Unit,
-    onUpdateMirrorImages: (Boolean) -> Unit
-) {
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Advanced Settings") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("Color Change: ${settings.colorChangePercent}%", style = MaterialTheme.typography.bodySmall)
-                Slider(
-                    value = settings.colorChangePercent.toFloat(),
-                    onValueChange = { onUpdateColorChange(it.roundToInt()) },
-                    valueRange = 0f..100f
-                )
-
-                val patternOptions = com.storrs.photomosaiccreatorandroid.models.PatternKind.values().toList()
-                val selectedPattern = settings.pattern
-                SettingsDropdown(
-                    label = "Pattern",
-                    selectedLabel = selectedPattern.name,
-                    options = patternOptions.map { it.name },
-                    onSelected = { index ->
-                        patternOptions.getOrNull(index)?.let { onUpdatePattern(it) }
-                    }
-                )
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(
-                        checked = settings.useAllImages,
-                        onCheckedChange = { onUpdateUseAllImages(it) }
-                    )
-                    Text("Use All Images", style = MaterialTheme.typography.bodyMedium)
-                }
-
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Checkbox(
-                        checked = settings.mirrorImages,
-                        onCheckedChange = { onUpdateMirrorImages(it) }
-                    )
-                    Text("Mirror Images", style = MaterialTheme.typography.bodyMedium)
-                }
-            }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Done")
-            }
-        }
-    )
-}
 
 @Composable
 private fun DebugReportDialog(
